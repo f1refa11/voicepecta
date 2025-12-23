@@ -1,4 +1,5 @@
 import tkinter
+import tkinter.ttk
 from tkinter import filedialog
 import customtkinter
 from PIL import Image
@@ -13,7 +14,7 @@ import torch
 # --- Globals ---
 audio_file_path = None
 VERSION = "0.0.4"
-current_ui_language = "en"
+current_ui_language = "ru"
 
 # --- Internationalization ---
 i18n = {
@@ -234,6 +235,14 @@ root = customtkinter.CTk()
 root.geometry("750x500")
 root.title(i18n[current_ui_language]["title"])
 root.resizable(True, True)
+
+# Load custom theme
+try:
+    root.tk.call("source", "assets/theme/dark.tcl")
+    style = tkinter.ttk.Style()
+    style.theme_use("sun-valley-dark")
+except Exception as e:
+    logging.warning(f"Could not load custom theme: {e}")
 
 # --- Main layout frames ---
 left_frame = customtkinter.CTkFrame(root, width=250)
