@@ -1,0 +1,13 @@
+[project]
+name = "voicepecta"
+version = "0.0.4"
+description = "Audio to text and readable notes"
+requires-python = ">=3.10"
+dependencies = [
+  "customtkinter==5.2.2",
+  "openai-whisper==20250625",
+  "pillow==12.1.0",
+  "vosk==0.3.45",
+  "sounddevice==0.5.2",
+  "soundfile==0.13.1",
+]
