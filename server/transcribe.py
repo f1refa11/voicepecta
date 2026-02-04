@@ -1,5 +1,6 @@
 import os
-from typing import Dict
+import threading
+from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -30,8 +31,10 @@ def _get_vosk_model(model_name: str) -> VoskModel:
     return _vosk_cache[model_name]
 
 
-def transcribe_audio(engine: str, model: str, audio_path: str, language: str | None = None) -> str:
+def transcribe_audio(engine: str, model: str, audio_path: str, language: str | None = None, cancel_event: Optional[threading.Event] = None) -> str:
     engine_lower = engine.strip().lower()
+    if cancel_event and cancel_event.is_set():
+        raise RuntimeError("cancelled")
     if engine_lower == "whisper":
         model_obj = _get_whisper_model(model)
         kwargs = {"verbose": False}
@@ -47,6 +50,8 @@ def transcribe_audio(engine: str, model: str, audio_path: str, language: str | N
         chunk_size = 4000
         total_samples = len(audio_int16)
         for i in range(0, total_samples, chunk_size):
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("cancelled")
             chunk = audio_int16[i : i + chunk_size]
             recognizer.AcceptWaveform(chunk.tobytes())
         final_result = recognizer.FinalResult()
