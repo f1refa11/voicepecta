@@ -1,4 +1,5 @@
 import threading
+import threading
 import uuid
 from queue import Queue
 from typing import Dict, Optional, Tuple
@@ -16,6 +17,7 @@ class Job:
         self.error: Optional[str] = None
         self._subscribers: list[Queue] = []
         self._lock = threading.Lock()
+        self._cancel_event = threading.Event()
 
     def subscribe(self) -> Queue:
         q: Queue = Queue()
@@ -34,6 +36,15 @@ class Job:
             subscribers = list(self._subscribers)
         for q in subscribers:
             q.put(None)
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+        self.emit("error", "cancelled")
+        self.close()
+
+    @property
+    def cancel_event(self) -> threading.Event:
+        return self._cancel_event
 
 
 class JobStore:
