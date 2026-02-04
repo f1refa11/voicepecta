@@ -1,8 +1,9 @@
 import tkinter
+import tkinter
 import tkinter.ttk as ttk
 from tkinter import filedialog, messagebox
 import customtkinter
-from PIL import Image
+from PIL import Image, ImageDraw, ImageOps
 import logging
 import threading
 import sys
@@ -12,12 +13,15 @@ import os
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 import zipfile
 import numpy as np
 from typing import Optional
 import sounddevice as sd
 import soundfile as sf
 from datetime import datetime
+import tempfile
+import uuid
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +31,14 @@ recording_stream = None
 recording_chunks = []
 is_recording = False
 is_paused = False
+recording_start_time: Optional[datetime] = None
+recording_timer_job = None
+prepared_profile_pic_path: Optional[str] = None
+profile_preview_image = None
+profile_preview_path: Optional[str] = None
+remote_transcribe_job_id: Optional[str] = None
+remote_transcribe_active = False
+account_dialog: Optional[customtkinter.CTkToplevel] = None
 selected_mic_index = None
 VERSION = "0.0.4"
 current_ui_language = "ru"
@@ -34,7 +46,7 @@ current_ui_language = "ru"
 # --- Internationalization ---
 i18n = {
     "en": {
-        "title": f"voicepecta v{VERSION}",
+        "title": f"Voicepecta v{VERSION}",
         "select_audio_file": "Select Audio File",
         "no_file_selected": "No file selected",
         "whisper_model": "Whisper Model",
@@ -67,9 +79,33 @@ i18n = {
         "recording_saved": "Recording saved: {name}",
         "mic_device": "Microphone",
         "no_mic_devices": "No input devices found",
+        "account_settings_dialog_title": "Account settings",
+        "change_profile_picture": "Change profile picture",
+        "choose_image": "Choose image",
+        "save_profile_picture": "Save profile picture",
+        "change_password": "Change password",
+        "current_password": "Current password",
+        "new_password": "New password",
+        "confirm_new_password": "New password again",
+        "save_password": "Save password",
+        "delete_account": "Delete account",
+        "delete_account_confirm": "Are you SURE that you want to delete your account? This action is irreversible!",
+        "delete_account_checkbox": "I'm aware this action is irreversible and I would lose my account forever",
+        "destroy_account": "Destroy account",
+        "account_deleted": "The account has been deleted. Thanks for using Voicepecta!",
+        "profile_pic_saved": "Profile picture updated",
+        "password_saved": "Password updated",
+        "password_mismatch": "New passwords do not match",
+        "password_required": "Please fill all password fields",
+        "image_required": "Please choose an image first",
+        "image_invalid": "Could not process image",
+        "delete_account_failed": "Account deletion failed: {reason}",
+        "profile_pic_failed": "Profile picture update failed: {reason}",
+        "password_change_failed": "Password change failed: {reason}",
+        "quit_prompt_transcribing": "The transcribing job is still running. Are you sure you want to quit Voicepecta?",
     },
     "ru": {
-        "title": f"voicepecta v{VERSION}",
+        "title": f"Voicepecta v{VERSION}",
         "select_audio_file": "Выберите аудиофайл",
         "no_file_selected": "Файл не выбран",
         "whisper_model": "Модель Whisper",
@@ -102,6 +138,30 @@ i18n = {
         "recording_saved": "Запись сохранена: {name}",
         "mic_device": "Микрофон",
         "no_mic_devices": "Устройства ввода не найдены",
+        "account_settings_dialog_title": "Настройки аккаунта",
+        "change_profile_picture": "Сменить аватар",
+        "choose_image": "Выбрать изображение",
+        "save_profile_picture": "Сохранить аватар",
+        "change_password": "Сменить пароль",
+        "current_password": "Текущий пароль",
+        "new_password": "Новый пароль",
+        "confirm_new_password": "Повторите пароль",
+        "save_password": "Сохранить пароль",
+        "delete_account": "Удалить аккаунт",
+        "delete_account_confirm": "Вы уверены, что хотите удалить аккаунт? Это действие необратимо!",
+        "delete_account_checkbox": "Я понимаю, что удалю аккаунт навсегда",
+        "destroy_account": "Удалить аккаунт",
+        "account_deleted": "Аккаунт удален. Спасибо, что использовали Voicepecta!",
+        "profile_pic_saved": "Аватар обновлен",
+        "password_saved": "Пароль обновлен",
+        "password_mismatch": "Новые пароли не совпадают",
+        "password_required": "Заполните все поля пароля",
+        "image_required": "Сначала выберите изображение",
+        "image_invalid": "Не удалось обработать изображение",
+        "delete_account_failed": "Не удалось удалить аккаунт: {reason}",
+        "profile_pic_failed": "Не удалось обновить аватар: {reason}",
+        "password_change_failed": "Не удалось сменить пароль: {reason}",
+        "quit_prompt_transcribing": "Задача транскрибации еще выполняется. Вы уверены, что хотите выйти из Voicepecta?",
     }
 }
 
@@ -134,7 +194,7 @@ VOSK_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models", "vosk")
 # Override i18n with corrected translations and extra strings
 i18n = {
     "en": {
-        "title": f"voicepecta v{VERSION}",
+        "title": f"Voicepecta v{VERSION}",
         "select_audio_file": "Select Audio File",
         "no_file_selected": "No file selected",
         "whisper_model": "Whisper Model",
@@ -174,9 +234,9 @@ i18n = {
         "logged_in_as": "logged in as:",
         "not_logged_in": "not logged in",
         "plan_placeholder": "plan: free trial (30 days left)",
-        "limit_placeholder": "daily limit: 0 / 5 transcriptions",
-        "login_dialog_title": "log in to the voicepecta server",
-        "register_dialog_title": "register to voicepecta",
+        "limit_placeholder": "daily limit: {used} / {limit} transcriptions used (resets daily)",
+        "login_dialog_title": "log in to the Voicepecta server",
+        "register_dialog_title": "register to Voicepecta",
         "login_label": "login:",
         "password_label": "password:",
         "enter_login_password": "enter login and password",
@@ -186,16 +246,40 @@ i18n = {
         "registration_success": "registration complete. please log in.",
         "registration_failed": "registration failed: {reason}",
         "use_local_version": "use local version",
-        "quit_prompt": "do you want to quit voicepecta?",
+        "quit_prompt": "do you want to quit Voicepecta?",
         "models_not_installed": "vosk and openai-whisper models are not installed. install them and try again",
-        "register_link": "register to voicepecta",
-        "login_link": "login to voicepecta",
+        "register_link": "register to Voicepecta",
+        "login_link": "login to Voicepecta",
         "login_button": "log in",
         "register_button": "register",
-        "login_first": "Please log in to the voicepecta server first.",
+        "login_first": "Please log in to the Voicepecta server first.",
+        "account_settings_dialog_title": "Account settings",
+        "change_profile_picture": "Change profile picture",
+        "choose_image": "Choose image",
+        "save_profile_picture": "Save profile picture",
+        "change_password": "Change password",
+        "current_password": "Current password",
+        "new_password": "New password",
+        "confirm_new_password": "New password again",
+        "save_password": "Save password",
+        "delete_account": "Delete account",
+        "delete_account_confirm": "Are you SURE that you want to delete your account? This action is irreversible!",
+        "delete_account_checkbox": "I'm aware this action is irreversible and I would lose my account forever",
+        "destroy_account": "Destroy account",
+        "account_deleted": "The account has been deleted. Thanks for using Voicepecta!",
+        "profile_pic_saved": "Profile picture updated",
+        "password_saved": "Password updated",
+        "password_mismatch": "New passwords do not match",
+        "password_required": "Please fill all password fields",
+        "image_required": "Please choose an image first",
+        "image_invalid": "Could not process image",
+        "delete_account_failed": "Account deletion failed: {reason}",
+        "profile_pic_failed": "Profile picture update failed: {reason}",
+        "password_change_failed": "Password change failed: {reason}",
+        "quit_prompt_transcribing": "The transcribing job is still running. Are you sure you want to quit Voicepecta?",
     },
     "ru": {
-        "title": f"voicepecta v{VERSION}",
+        "title": f"Voicepecta v{VERSION}",
         "select_audio_file": "Выберите аудиофайл",
         "no_file_selected": "Файл не выбран",
         "whisper_model": "Модель Whisper",
@@ -232,28 +316,52 @@ i18n = {
         "account": "Аккаунт",
         "account_settings": "Настройки аккаунта",
         "logout": "Выйти",
-        "logged_in_as": "вы вошли как:",
-        "not_logged_in": "не авторизован",
-        "plan_placeholder": "тариф: пробный период (осталось 30 дней)",
-        "limit_placeholder": "дневной лимит: 0 / 5 транскрипций",
-        "login_dialog_title": "вход на сервер voicepecta",
-        "register_dialog_title": "регистрация в voicepecta",
-        "login_label": "логин:",
-        "password_label": "пароль:",
-        "enter_login_password": "введите логин и пароль",
-        "contacting_server": "соединение с сервером...",
-        "login_successful": "вход выполнен",
-        "login_failed": "не удалось войти: {reason}",
-        "registration_success": "регистрация завершена. войдите в систему.",
-        "registration_failed": "не удалось зарегистрироваться: {reason}",
-        "use_local_version": "использовать локальную версию",
-        "quit_prompt": "выйти из voicepecta?",
+        "logged_in_as": "Вы вошли как:",
+        "not_logged_in": "Не авторизован",
+        "plan_placeholder": "Тариф: пробный период (осталось 30 дней)",
+        "limit_placeholder": "Дневной лимит: {used} / {limit} транскрипций использовано (сбрасывается ежедневно)",
+        "login_dialog_title": "Вход на сервер Voicepecta",
+        "register_dialog_title": "Регистрация в Voicepecta",
+        "login_label": "Логин:",
+        "password_label": "Пароль:",
+        "enter_login_password": "Введите логин и пароль",
+        "contacting_server": "Соединение с сервером...",
+        "login_successful": "Вход выполнен",
+        "login_failed": "Не удалось войти: {reason}",
+        "registration_success": "Регистрация завершена. войдите в систему.",
+        "registration_failed": "Не удалось зарегистрироваться: {reason}",
+        "use_local_version": "Использовать локальную версию",
+        "quit_prompt": "Выйти из Voicepecta?",
         "models_not_installed": "Модели vosk и openai-whisper не установлены. Установите их и попробуйте снова.",
-        "register_link": "регистрация в voicepecta",
-        "login_link": "войти в voicepecta",
+        "register_link": "Регистрация в Voicepecta",
+        "login_link": "Войти в Voicepecta",
         "login_button": "Войти",
         "register_button": "Зарегистрироваться",
-        "login_first": "Сначала войдите в сервер voicepecta.",
+        "login_first": "Сначала войдите в сервер Voicepecta.",
+        "account_settings_dialog_title": "Настройки аккаунта",
+        "change_profile_picture": "Сменить аватар",
+        "choose_image": "Выбрать изображение",
+        "save_profile_picture": "Сохранить аватар",
+        "change_password": "Сменить пароль",
+        "current_password": "Текущий пароль",
+        "new_password": "Новый пароль",
+        "confirm_new_password": "Повторите пароль",
+        "save_password": "Сохранить пароль",
+        "delete_account": "Удалить аккаунт",
+        "delete_account_confirm": "Вы уверены, что хотите удалить аккаунт? Это действие необратимо!",
+        "delete_account_checkbox": "Я понимаю, что удалю аккаунт навсегда",
+        "destroy_account": "Удалить аккаунт",
+        "account_deleted": "Аккаунт удален. Спасибо, что использовали Voicepecta!",
+        "profile_pic_saved": "Аватар обновлен",
+        "password_saved": "Пароль обновлен",
+        "password_mismatch": "Новые пароли не совпадают",
+        "password_required": "Заполните все поля пароля",
+        "image_required": "Сначала выберите изображение",
+        "image_invalid": "Не удалось обработать изображение",
+        "delete_account_failed": "Не удалось удалить аккаунт: {reason}",
+        "profile_pic_failed": "Не удалось обновить аватар: {reason}",
+        "password_change_failed": "Не удалось сменить пароль: {reason}",
+        "quit_prompt_transcribing": "Задача транскрибации еще выполняется. Вы уверены, что хотите выйти из Voicepecta?",
     }
 }
 # --- Config ---
@@ -270,7 +378,8 @@ DEFAULT_CONFIG = {
     "use_external_server": None,  # None means not chosen yet
     "auth_token": None,
     "username": None,
-    "server_url": "http://127.0.0.1:8000",
+    "profile_pic": None,
+    "server_url": "http://95.31.11.50:7788",
     "onboarded": False,
 }
 config_data = DEFAULT_CONFIG.copy()
@@ -313,6 +422,9 @@ def load_config():
                 config_data.update(data)
     except Exception as e:
         log.debug(f"Using default config, could not load {CONFIG_PATH}: {e}")
+    # migrate old default port to new default
+    if config_data.get("server_url") == "http://95.31.11.50:8000":
+        config_data["server_url"] = "http://95.31.11.50:7788"
     current_ui_language = config_data.get("ui_language", "ru")
     selected_mic_index = config_data.get("selected_mic_index")
     audio_file_path = config_data.get("last_audio_file")
@@ -409,9 +521,8 @@ def update_ui_language(lang_choice: str):
         selected_file_label.configure(text=lang_dict["no_file_selected"])
     update_model_label()
     engine_label.configure(text=lang_dict["engine"])
-    recordButton.configure(text=lang_dict["record"])
+    recordButton.configure(text=lang_dict["stop_recording"] if is_recording else lang_dict["record"])
     pauseButton.configure(text=lang_dict["pause_recording"] if not is_paused else lang_dict["resume_recording"])
-    stopButton.configure(text=lang_dict["stop_recording"])
     transcribeButton.configure(text=lang_dict["transcribe"])
     settingsButton.configure(text=lang_dict["settings"])
     cpu_checkbox.configure(text=lang_dict["use_cpu"])
@@ -445,6 +556,7 @@ def open_settings_window():
     settings_win.title(i18n[current_ui_language]["settings_title"])
     settings_win.geometry("350x260")
     settings_win.transient(root)
+    settings_win.bind("<Escape>", lambda _e: settings_win.destroy())
 
     def update_settings_ui(lang_choice: str):
         lang_code = "ru" if lang_choice == "Russian" else "en"
@@ -644,6 +756,34 @@ def _post_json(path: str, payload: dict) -> dict:
         return json.load(response)
 
 
+def _post_form(path: str, fields: dict[str, str], files: dict[str, tuple[str, bytes, str]] | None = None) -> dict:
+    url = build_server_url(path)
+    if files:
+        boundary = "----voicepectaBoundary" + os.urandom(8).hex()
+        body = io.BytesIO()
+        for name, value in fields.items():
+            body.write(f"--{boundary}\r\n".encode("utf-8"))
+            body.write(f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8"))
+        for name, (filename, content, content_type) in files.items():
+            body.write(f"--{boundary}\r\n".encode("utf-8"))
+            body.write(
+                f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode("utf-8")
+            )
+            body.write(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+            body.write(content)
+            body.write(b"\r\n")
+        body.write(f"--{boundary}--\r\n".encode("utf-8"))
+        data = body.getvalue()
+        headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    else:
+        encoded = urllib.parse.urlencode(fields).encode("utf-8")
+        data = encoded
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as response:
+        return json.load(response)
+
+
 def validate_token(token: str) -> bool:
     try:
         resp = _post_json("/v1/status", {"token": token})
@@ -665,6 +805,7 @@ def attempt_login_remote(login: str, password: str) -> tuple[bool, str]:
             "username": login,
             "use_external_server": True,
             "onboarded": True,
+            "profile_pic": resp.get("profile_pic"),
         })
         save_config()
         return True, ""
@@ -682,6 +823,125 @@ def attempt_register_remote(login: str, password: str) -> tuple[bool, str]:
     return False, "failed"
 
 
+def change_password_remote(old_pass: str, new_pass: str) -> tuple[bool, str]:
+    token = config_data.get("auth_token")
+    if not token:
+        return False, "no token"
+    try:
+        resp = _post_form(
+            "/v1/account/changepasswd",
+            {"old_pass": old_pass, "new_pass": new_pass, "token": token},
+        )
+    except Exception as e:
+        log.error(f"Change password failed: {e}")
+        return False, "network error"
+    if resp.get("status") == "ok" and resp.get("token"):
+        config_data["auth_token"] = resp.get("token")
+        save_config()
+        return True, ""
+    return False, resp.get("reason", "fail")
+
+
+def destroy_account_remote(password: str) -> tuple[bool, str]:
+    token = config_data.get("auth_token")
+    if not token:
+        return False, "no token"
+    try:
+        resp = _post_form("/v1/account/destroy", {"passwd": password, "token": token})
+    except Exception as e:
+        log.error(f"Destroy account failed: {e}")
+        return False, "network error"
+    if resp.get("status") == "ok":
+        return True, ""
+    return False, resp.get("reason", "fail")
+
+
+def upload_profile_picture_remote(file_path: str) -> tuple[bool, str, Optional[str]]:
+    token = config_data.get("auth_token")
+    if not token:
+        return False, "no token", None
+    try:
+        with open(file_path, "rb") as f:
+            content = f.read()
+        resp = _post_form(
+            "/v1/account/profile_pic",
+            {"token": token},
+            {"profile_pic": (os.path.basename(file_path), content, "image/png")},
+        )
+    except Exception as e:
+        log.error(f"Upload profile picture failed: {e}")
+        return False, "network error", None
+    if resp.get("status") == "ok":
+        filename = resp.get("filename")
+        if filename:
+            config_data["profile_pic"] = filename
+            save_config()
+        return True, "", filename
+    return False, resp.get("reason", "fail"), None
+
+
+def cancel_remote_job(job_id: str) -> bool:
+    token = config_data.get("auth_token")
+    if not token:
+        return False
+    try:
+        resp = _post_form(f"/v1/transcribe/{job_id}/cancel", {"token": token})
+        return resp.get("status") == "ok"
+    except Exception as e:
+        log.error(f"Cancel remote job failed: {e}")
+        return False
+
+
+def prepare_profile_image(file_path: str) -> Optional[str]:
+    resample = _get_resample()
+    try:
+        img = Image.open(file_path).convert("RGBA")
+        img = ImageOps.fit(img, (256, 256), method=resample)
+        mask = Image.new("L", (256, 256), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.ellipse((0, 0, 256, 256), fill=255)
+        img.putalpha(mask)
+        temp_path = os.path.join(tempfile.gettempdir(), f"voicepecta-avatar-{uuid.uuid4().hex}.png")
+        img.save(temp_path, format="PNG")
+        return temp_path
+    except Exception as e:
+        log.error(f"Failed to prepare profile image: {e}")
+        return None
+
+
+def _get_resample():
+    try:
+        return Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+    except AttributeError:
+        return Image.LANCZOS  # type: ignore[attr-defined]
+
+
+def fetch_remote_avatar(filename: str, size: tuple[int, int] = (70, 70)):
+    if not filename:
+        return None
+    url = build_server_url(f"/avatars/{filename}")
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = resp.read()
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        resample = _get_resample()
+        img = ImageOps.fit(img, size, method=resample)
+        return customtkinter.CTkImage(img, size=size)
+    except Exception as e:
+        log.error(f"Failed to fetch avatar: {e}")
+        return None
+
+
+def close_account_dialog():
+    global account_dialog
+    if account_dialog is not None:
+        try:
+            account_dialog.destroy()
+        except Exception:
+            pass
+    account_dialog = None
+
+
 def check_local_dependencies() -> bool:
     try:
         import whisper  # noqa: F401
@@ -692,11 +952,22 @@ def check_local_dependencies() -> bool:
 
 
 def show_account_dialog():
+    global account_dialog
+    close_account_dialog()
     dlg = customtkinter.CTkToplevel(root)
+    account_dialog = dlg
     dlg.title(i18n[current_ui_language]["account"])
     dlg.geometry("420x360")
     dlg.transient(root)
+    dlg.lift()
+    dlg.update_idletasks()
+    dlg.wait_visibility()
     dlg.grab_set()
+    dlg.focus_force()
+    def on_close(_e=None):
+        close_account_dialog()
+    dlg.bind("<Escape>", on_close)
+    dlg.protocol("WM_DELETE_WINDOW", on_close)
 
     wrapper = customtkinter.CTkFrame(dlg, fg_color="transparent")
     wrapper.pack(fill="both", expand=True, padx=20, pady=20)
@@ -707,6 +978,15 @@ def show_account_dialog():
     avatar = customtkinter.CTkFrame(header, width=70, height=70, corner_radius=40, border_width=2, fg_color="transparent")
     avatar.pack(side="left", padx=(0, 12))
     avatar.pack_propagate(False)
+    avatar_label = customtkinter.CTkLabel(avatar, text="")
+    avatar_label.pack(expand=True)
+    avatar_img = None
+    profile_filename = config_data.get("profile_pic")
+    if profile_filename:
+        avatar_img = fetch_remote_avatar(profile_filename, size=(70, 70))
+        if avatar_img:
+            avatar_label.configure(image=avatar_img)
+            avatar_label.image = avatar_img
 
     user_box = customtkinter.CTkFrame(header, fg_color="transparent")
     user_box.pack(side="left", fill="x", expand=True)
@@ -717,7 +997,25 @@ def show_account_dialog():
     info_frame = customtkinter.CTkFrame(wrapper, fg_color="transparent")
     info_frame.pack(fill="x", pady=(0, 20))
     customtkinter.CTkLabel(info_frame, text=i18n[current_ui_language]["plan_placeholder"], font=("Arial", 18)).pack(anchor="w", pady=(0, 4))
-    customtkinter.CTkLabel(info_frame, text=i18n[current_ui_language]["limit_placeholder"], font=("Arial", 18)).pack(anchor="w")
+    limit_label = customtkinter.CTkLabel(info_frame, text=i18n[current_ui_language]["limit_placeholder"].format(used=0, limit=5), font=("Arial", 18))
+    limit_label.pack(anchor="w")
+
+    def refresh_limit_label():
+        token = config_data.get("auth_token")
+        if not token:
+            return
+        try:
+            resp = _post_json("/v1/status", {"token": token})
+        except Exception as e:
+            log.error(f"Status request failed: {e}")
+            return
+        if resp.get("status") != "ok":
+            return
+        used = int(resp.get("daily_used", 0) or 0)
+        limit = int(resp.get("daily_limit", 5) or 5)
+        limit_label.configure(text=i18n[current_ui_language]["limit_placeholder"].format(used=used, limit=limit))
+
+    refresh_limit_label()
 
     def do_logout():
         config_data.update({
@@ -730,8 +1028,194 @@ def show_account_dialog():
         dlg.destroy()
         root.after(50, show_initial_dialog)
 
-    customtkinter.CTkButton(wrapper, text=i18n[current_ui_language]["account_settings"], width=360, command=lambda: None).pack(fill="x", pady=(0, 12))
+    customtkinter.CTkButton(wrapper, text=i18n[current_ui_language]["account_settings"], width=360, command=show_account_settings_dialog).pack(fill="x", pady=(0, 12))
     customtkinter.CTkButton(wrapper, text=i18n[current_ui_language]["logout"], width=360, command=do_logout).pack(fill="x")
+
+
+def show_account_settings_dialog():
+    global profile_preview_image, profile_preview_path, prepared_profile_pic_path
+    dlg = customtkinter.CTkToplevel(root)
+    dlg.title(i18n[current_ui_language]["account_settings_dialog_title"])
+    dlg.geometry("540x560")
+    dlg.transient(root)
+    dlg.lift()
+    dlg.update_idletasks()
+    dlg.wait_visibility()
+    dlg.grab_set()
+    dlg.focus_force()
+    dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+    wrapper = customtkinter.CTkFrame(dlg, fg_color="transparent")
+    wrapper.pack(fill="both", expand=True, padx=20, pady=20)
+
+    customtkinter.CTkLabel(wrapper, text=i18n[current_ui_language]["account_settings_dialog_title"], font=("Arial", 20)).pack(anchor="w", pady=(0, 10))
+
+    # Change profile picture
+    customtkinter.CTkLabel(wrapper, text=i18n[current_ui_language]["change_profile_picture"], font=("Arial", 16)).pack(anchor="w")
+    ttk.Separator(wrapper, orient="horizontal").pack(fill="x", pady=(4, 10))
+
+    pic_row = customtkinter.CTkFrame(wrapper, fg_color="transparent")
+    pic_row.pack(fill="x", pady=(0, 8))
+
+    avatar_frame = customtkinter.CTkFrame(pic_row, width=90, height=90, corner_radius=45, fg_color="#e5e5e5")
+    avatar_frame.pack(side="left", padx=(0, 12))
+    avatar_frame.pack_propagate(False)
+    preview_label = customtkinter.CTkLabel(avatar_frame, text="")
+    preview_label.pack(expand=True)
+
+    if profile_preview_path and os.path.exists(profile_preview_path):
+        try:
+            profile_preview_image = customtkinter.CTkImage(Image.open(profile_preview_path), size=(80, 80))
+            preview_label.configure(image=profile_preview_image)
+        except Exception:
+            profile_preview_image = None
+
+    button_column = customtkinter.CTkFrame(pic_row, fg_color="transparent")
+    button_column.pack(side="left", fill="x", expand=True)
+
+    def choose_image():
+        nonlocal preview_label
+        global profile_preview_path, prepared_profile_pic_path, profile_preview_image
+        path = filedialog.askopenfilename(filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif"), ("All files", "*.*")])
+        if not path:
+            return
+        processed = prepare_profile_image(path)
+        if not processed:
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["image_invalid"])
+            return
+        if profile_preview_path and profile_preview_path != processed:
+            try:
+                os.remove(profile_preview_path)
+            except OSError:
+                pass
+        profile_preview_path = processed
+        prepared_profile_pic_path = processed
+        try:
+            profile_preview_image = customtkinter.CTkImage(Image.open(processed), size=(80, 80))
+            preview_label.configure(image=profile_preview_image)
+        except Exception:
+            profile_preview_image = None
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["image_invalid"])
+
+    def save_profile_picture():
+        if not prepared_profile_pic_path or not os.path.exists(prepared_profile_pic_path):
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["image_required"])
+            return
+        ok, reason, filename = upload_profile_picture_remote(prepared_profile_pic_path)
+        if ok:
+            messagebox.showinfo(i18n[current_ui_language]["title"], i18n[current_ui_language]["profile_pic_saved"])
+        else:
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["profile_pic_failed"].format(reason=reason))
+
+    customtkinter.CTkButton(button_column, text=i18n[current_ui_language]["choose_image"], command=choose_image).pack(fill="x", pady=(0, 6))
+    customtkinter.CTkButton(button_column, text=i18n[current_ui_language]["save_profile_picture"], command=save_profile_picture).pack(fill="x")
+
+    # Change password
+    customtkinter.CTkLabel(wrapper, text=i18n[current_ui_language]["change_password"], font=("Arial", 16)).pack(anchor="w", pady=(10, 0))
+    ttk.Separator(wrapper, orient="horizontal").pack(fill="x", pady=(4, 10))
+
+    pass_frame = customtkinter.CTkFrame(wrapper, fg_color="transparent")
+    pass_frame.pack(fill="x", pady=(0, 8))
+
+    def _add_pass_row(label_text):
+        row = customtkinter.CTkFrame(pass_frame, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 6))
+        customtkinter.CTkLabel(row, text=label_text, width=180, anchor="e").grid(row=0, column=0, padx=(0, 8))
+        entry = customtkinter.CTkEntry(row, show="*")
+        entry.grid(row=0, column=1, sticky="ew")
+        row.grid_columnconfigure(1, weight=1)
+        return entry
+
+    current_pass_entry = _add_pass_row(i18n[current_ui_language]["current_password"])
+    new_pass_entry = _add_pass_row(i18n[current_ui_language]["new_password"])
+    confirm_pass_entry = _add_pass_row(i18n[current_ui_language]["confirm_new_password"])
+
+    def save_password():
+        old_pass = current_pass_entry.get().strip()
+        new_pass = new_pass_entry.get().strip()
+        confirm_pass = confirm_pass_entry.get().strip()
+        if not old_pass or not new_pass or not confirm_pass:
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["password_required"])
+            return
+        if new_pass != confirm_pass:
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["password_mismatch"])
+            return
+        ok, reason = change_password_remote(old_pass, new_pass)
+        if ok:
+            messagebox.showinfo(i18n[current_ui_language]["title"], i18n[current_ui_language]["password_saved"])
+            current_pass_entry.delete(0, tkinter.END)
+            new_pass_entry.delete(0, tkinter.END)
+            confirm_pass_entry.delete(0, tkinter.END)
+        else:
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["password_change_failed"].format(reason=reason))
+
+    customtkinter.CTkButton(wrapper, text=i18n[current_ui_language]["save_password"], command=save_password).pack(fill="x", pady=(4, 10))
+
+    # Delete account
+    customtkinter.CTkLabel(wrapper, text=i18n[current_ui_language]["delete_account"], font=("Arial", 16)).pack(anchor="w", pady=(6, 0))
+    ttk.Separator(wrapper, orient="horizontal").pack(fill="x", pady=(4, 10))
+
+    def open_delete_confirm():
+        confirm = customtkinter.CTkToplevel(dlg)
+        confirm.title(i18n[current_ui_language]["delete_account"])
+        confirm.geometry("420x220")
+        confirm.transient(dlg)
+        confirm.lift()
+        confirm.update_idletasks()
+        confirm.wait_visibility()
+        confirm.grab_set()
+        confirm.focus_force()
+        confirm.bind("<Escape>", lambda _e: confirm.destroy())
+
+        inner = customtkinter.CTkFrame(confirm, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=20, pady=15)
+
+        customtkinter.CTkLabel(inner, text=i18n[current_ui_language]["delete_account_confirm"], wraplength=360, justify="left").pack(anchor="w", pady=(0, 8))
+        aware_var = tkinter.BooleanVar(value=False)
+        customtkinter.CTkCheckBox(inner, text=i18n[current_ui_language]["delete_account_checkbox"], variable=aware_var).pack(anchor="w", pady=(0, 8))
+
+        pass_row = customtkinter.CTkFrame(inner, fg_color="transparent")
+        pass_row.pack(fill="x", pady=(0, 10))
+        pass_entry = customtkinter.CTkEntry(pass_row, show="*")
+        pass_entry.grid(row=0, column=0, sticky="ew")
+        customtkinter.CTkLabel(pass_row, text=i18n[current_ui_language]["current_password"], width=180, anchor="w").grid(row=0, column=1, padx=(8, 0))
+        pass_row.grid_columnconfigure(0, weight=1)
+
+        def confirm_delete():
+            if not aware_var.get():
+                messagebox.showerror(
+                    i18n[current_ui_language]["title"],
+                    i18n[current_ui_language]["delete_account_failed"].format(reason="confirmation required"),
+                )
+                return
+            passwd = pass_entry.get().strip()
+            if not passwd:
+                messagebox.showerror(
+                    i18n[current_ui_language]["title"],
+                    i18n[current_ui_language]["delete_account_failed"].format(reason="password required"),
+                )
+                return
+            ok, reason = destroy_account_remote(passwd)
+            if ok:
+                messagebox.showinfo(i18n[current_ui_language]["title"], i18n[current_ui_language]["account_deleted"])
+                config_data.update({
+                    "auth_token": None,
+                    "username": None,
+                    "use_external_server": None,
+                    "onboarded": False,
+                    "profile_pic": None,
+                })
+                save_config()
+                confirm.destroy()
+                dlg.destroy()
+                close_account_dialog()
+                root.after(50, show_initial_dialog)
+            else:
+                messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["delete_account_failed"].format(reason=reason))
+
+        customtkinter.CTkButton(inner, text=i18n[current_ui_language]["destroy_account"], fg_color="#d9534f", hover_color="#c9302c", command=confirm_delete).pack(fill="x")
+
+    customtkinter.CTkButton(wrapper, text=i18n[current_ui_language]["delete_account"], fg_color="#d9534f", hover_color="#c9302c", command=open_delete_confirm).pack(fill="x")
 
 def get_input_devices():
     devices = sd.query_devices()
@@ -761,18 +1245,57 @@ def _recording_callback(indata, frames, time_info, status):
         return
     recording_chunks.append(indata.copy())
 
+def _format_elapsed(delta) -> str:
+    total_seconds = int(delta.total_seconds())
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+def _update_recording_timer():
+    global recording_timer_job
+    if not is_recording or recording_start_time is None:
+        recording_timer_job = None
+        return
+    elapsed = datetime.now() - recording_start_time
+    status = i18n[current_ui_language]["recording_paused"] if is_paused else i18n[current_ui_language]["recording_status"]
+    progress_label.configure(text=f"{status} {_format_elapsed(elapsed)}")
+    recording_timer_job = root.after(500, _update_recording_timer)
+
+def _start_recording_timer():
+    global recording_timer_job
+    if recording_timer_job:
+        root.after_cancel(recording_timer_job)
+    _update_recording_timer()
+
+def _stop_recording_timer():
+    global recording_timer_job
+    if recording_timer_job:
+        root.after_cancel(recording_timer_job)
+        recording_timer_job = None
+
+def toggle_recording():
+    if is_recording:
+        stop_recording()
+    else:
+        start_recording()
+
 def start_recording():
-    global recording_stream, recording_chunks, is_recording, is_paused, audio_file_path
+    global recording_stream, recording_chunks, is_recording, is_paused, audio_file_path, recording_start_time
     if is_recording:
         return
     recording_chunks = []
     is_recording = True
     is_paused = False
-    recordButton.configure(state="disabled")
+    recording_start_time = datetime.now()
+    recordButton.configure(text=i18n[current_ui_language]["stop_recording"])
     pauseButton.configure(state="normal")
-    stopButton.configure(state="normal")
-    progress_label.configure(text=i18n[current_ui_language]["recording_status"])
+    progress_bar.configure(mode="indeterminate")
+    progress_bar.start()
+    progress_bar.pack(fill="x", padx=10, pady=(0, 4))
     progress_label.pack(pady=(0, 10), padx=10)
+    _start_recording_timer()
     try:
         recording_stream = sd.InputStream(
             samplerate=16000,
@@ -795,10 +1318,10 @@ def toggle_pause():
     is_paused = not is_paused
     if is_paused:
         pauseButton.configure(text=i18n[current_ui_language]["resume_recording"])
-        progress_label.configure(text=i18n[current_ui_language]["recording_paused"])
+        _update_recording_timer()
     else:
         pauseButton.configure(text=i18n[current_ui_language]["pause_recording"])
-        progress_label.configure(text=i18n[current_ui_language]["recording_status"])
+        _update_recording_timer()
 
 def stop_recording(save: bool = True):
     global recording_stream, is_recording, is_paused, audio_file_path
@@ -810,11 +1333,15 @@ def stop_recording(save: bool = True):
         recording_stream.stop()
         recording_stream.close()
         recording_stream = None
-    recordButton.configure(state="normal")
+    recordButton.configure(text=i18n[current_ui_language]["record"])
     pauseButton.configure(state="disabled")
     pauseButton.configure(text=i18n[current_ui_language]["pause_recording"])
-    stopButton.configure(state="disabled")
+    progress_bar.stop()
+    progress_bar.pack_forget()
+    progress_bar.configure(mode="determinate")
     progress_label.pack_forget()
+    _stop_recording_timer()
+    recording_start_time = None
     if save and recording_chunks:
         audio = np.concatenate(recording_chunks, axis=0)
         recordings_dir = os.path.join(os.path.dirname(__file__), "recordings")
@@ -860,6 +1387,7 @@ def transcribe():
     transcribe_thread.start()
 
 def send_transcription_request(engine_choice: str, model_choice: str, token: str) -> str:
+    global remote_transcribe_job_id
     url = build_server_url("/v1/transcribe")
     boundary = "----voicepectaBoundary" + os.urandom(8).hex()
     body = io.BytesIO()
@@ -921,6 +1449,8 @@ def send_transcription_request(engine_choice: str, model_choice: str, token: str
                 if current_event == "status":
                     progress_label.configure(text=payload)
                     root.update_idletasks()
+                if current_event == "job_id":
+                    remote_transcribe_job_id = payload
                 data_lines.append(payload)
 
     if result_text:
@@ -929,12 +1459,14 @@ def send_transcription_request(engine_choice: str, model_choice: str, token: str
 
 
 def _do_transcribe_external(engine_choice: str, model_choice: str):
+    global remote_transcribe_job_id, remote_transcribe_active
     lang_dict = i18n[current_ui_language]
     transcribeButton.configure(text=lang_dict["transcribing"], state="disabled")
     result_textbox.delete("1.0", tkinter.END)
     
     progress_bar.pack(pady=(5, 10), padx=10, fill="x")
     progress_label.pack(pady=(0, 10), padx=10)
+    progress_bar.configure(mode="determinate")
     progress_bar.set(0)
 
     token = config_data.get("auth_token")
@@ -945,6 +1477,8 @@ def _do_transcribe_external(engine_choice: str, model_choice: str):
         progress_label.pack_forget()
         return
 
+    remote_transcribe_active = True
+    remote_transcribe_job_id = None
     try:
         result_text = send_transcription_request(engine_choice, model_choice, token)
         result_textbox.insert(tkinter.END, result_text)
@@ -952,6 +1486,8 @@ def _do_transcribe_external(engine_choice: str, model_choice: str):
         log.error(f"External transcription failed: {e}")
         result_textbox.insert(tkinter.END, lang_dict["error_transcription"].format(e=e))
     finally:
+        remote_transcribe_active = False
+        remote_transcribe_job_id = None
         transcribeButton.configure(text=lang_dict["transcribe"], state="normal")
         progress_bar.pack_forget()
         progress_label.pack_forget()
@@ -963,6 +1499,7 @@ def _do_transcribe(engine_choice: str, model_choice: str):
     
     progress_bar.pack(pady=(5, 10), padx=10, fill="x")
     progress_label.pack(pady=(0, 10), padx=10)
+    progress_bar.configure(mode="determinate")
     progress_bar.set(0)
     
     try:
@@ -1045,14 +1582,27 @@ except Exception as e:
 customtkinter.set_default_color_theme("blue")
 
 root = customtkinter.CTk()
-root.geometry("750x715")
+root.geometry("760x635")
+root.minsize(435, 620)
 root.title(i18n[current_ui_language]["title"])
 root.resizable(True, True)
 
+
+def handle_app_close():
+    if remote_transcribe_active:
+        if not messagebox.askyesno(i18n[current_ui_language]["title"], i18n[current_ui_language]["quit_prompt_transcribing"]):
+            return
+        if remote_transcribe_job_id:
+            cancel_remote_job(remote_transcribe_job_id)
+    root.destroy()
+
+
+root.protocol("WM_DELETE_WINDOW", handle_app_close)
+
 # Load custom theme
 # try:
-#     root.tk.call("source", "assets/theme/dark.tcl")
-#     apply_ttk_theme(initial_theme)
+    # root.tk.call("source", "assets/theme/dark.tcl")
+    # apply_ttk_theme(initial_theme)
 # except Exception as e:
 #     logging.warning(f"Could not load custom theme: {e}")
 
@@ -1078,7 +1628,7 @@ logo_label = customtkinter.CTkLabel(left_frame, image=logo_image, text="")
 logo_label.pack(pady=20, padx=10)
 
 selectFileButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["select_audio_file"], command=select_audio_file)
-selectFileButton.pack(pady=10, padx=10, fill="x")
+selectFileButton.pack(pady=(0, 10), padx=10, fill="x")
 
 selected_file_label = customtkinter.CTkLabel(left_frame, text=i18n[current_ui_language]["no_file_selected"], wraplength=230, justify="center")
 if audio_file_path:
@@ -1086,7 +1636,7 @@ if audio_file_path:
 selected_file_label.pack(pady=5, padx=10)
 
 engine_label = customtkinter.CTkLabel(left_frame, text=i18n[current_ui_language]["engine"])
-engine_label.pack(pady=(20, 5), padx=10)
+engine_label.pack(pady=(10, 0), padx=10)
 
 initial_engine = config_data.get("engine", "Whisper")
 if initial_engine not in ENGINE_OPTIONS:
@@ -1094,10 +1644,10 @@ if initial_engine not in ENGINE_OPTIONS:
 
 engineOptionMenu = customtkinter.CTkComboBox(left_frame, values=ENGINE_OPTIONS, command=update_model_options)
 engineOptionMenu.set(initial_engine)
-engineOptionMenu.pack(pady=5, padx=10, fill="x")
+engineOptionMenu.pack(pady=(0, 5), padx=10, fill="x")
 
 lang_label = customtkinter.CTkLabel(left_frame, text=i18n[current_ui_language]["language_label"])
-lang_label.pack(pady=(12, 5), padx=10)
+lang_label.pack(pady=(10, 0), padx=10)
 LANG_OPTIONS = ["Russian", "Auto", "English"]
 initial_lang = config_data.get("transcription_language", "Russian")
 if initial_lang not in LANG_OPTIONS:
@@ -1109,10 +1659,10 @@ def on_language_selected(choice: str):
 
 language_combo = customtkinter.CTkComboBox(left_frame, values=LANG_OPTIONS, command=on_language_selected)
 language_combo.set(initial_lang)
-language_combo.pack(pady=5, padx=10, fill="x")
+language_combo.pack(pady=(0, 5), padx=10, fill="x")
 
 model_label = customtkinter.CTkLabel(left_frame, text=i18n[current_ui_language]["whisper_model"])
-model_label.pack(pady=(20, 5), padx=10)
+model_label.pack(pady=(10, 0), padx=10)
 
 if initial_engine == "Vosk":
     model_values = list(VOSK_MODELS.keys())
@@ -1127,7 +1677,7 @@ else:
 
 modelOptionMenu = customtkinter.CTkComboBox(left_frame, values=model_values, command=on_model_selected)
 modelOptionMenu.set(initial_model)
-modelOptionMenu.pack(pady=5, padx=10, fill="x")
+modelOptionMenu.pack(pady=(0, 5), padx=10, fill="x")
 
 cpu_checkbox = customtkinter.CTkCheckBox(left_frame, text=i18n[current_ui_language]["use_cpu"], command=on_cpu_toggle)
 if config_data.get("use_cpu"):
@@ -1138,19 +1688,23 @@ if initial_engine == "Vosk":
     model_label.configure(text=i18n[current_ui_language]["vosk_model"])
     cpu_checkbox.configure(state="disabled")
 
-transcribeButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["transcribe"], command=transcribe)
+transcribeButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["transcribe"], command=transcribe, height=48)
 transcribeButton.pack(side="bottom", pady=10, padx=10, fill="x")
-
-stopButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["stop_recording"], command=stop_recording, state="disabled")
-stopButton.pack(side="bottom", pady=(0, 10), padx=10, fill="x")
 
 pauseButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["pause_recording"], command=toggle_pause, state="disabled")
 pauseButton.pack(side="bottom", pady=(0, 10), padx=10, fill="x")
 
-recordButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["record"], command=start_recording)
+recordButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["record"], command=toggle_recording)
 recordButton.pack(side="bottom", pady=(0, 10), padx=10, fill="x")
 
-settingsButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["settings"], command=open_settings_window, fg_color="transparent", border_width=2)
+settingsButton = customtkinter.CTkButton(
+    left_frame,
+    text=i18n[current_ui_language]["settings"],
+    command=open_settings_window,
+    fg_color="transparent",
+    border_width=2,
+    text_color=("black", "white"),
+)
 settingsButton.pack(side="bottom", pady=(0,10), padx=10, fill="x")
 
 # --- Right frame widgets ---
@@ -1164,48 +1718,6 @@ result_textbox.pack(fill="both", expand=True, padx=5, pady=5)
 progress_bar = customtkinter.CTkProgressBar(right_frame, mode="determinate")
 progress_label = customtkinter.CTkLabel(right_frame, text="")
 
-def show_account_dialog():
-    dlg = customtkinter.CTkToplevel(root)
-    dlg.title("Account")
-    dlg.geometry("420x360")
-    dlg.transient(root)
-    dlg.grab_set()
-
-    wrapper = customtkinter.CTkFrame(dlg, fg_color="transparent")
-    wrapper.pack(fill="both", expand=True, padx=20, pady=20)
-
-    header = customtkinter.CTkFrame(wrapper, fg_color="transparent")
-    header.pack(fill="x", pady=(0, 12))
-
-    avatar = customtkinter.CTkFrame(header, width=70, height=70, corner_radius=40, border_width=2, fg_color="transparent")
-    avatar.pack(side="left", padx=(0, 12))
-    avatar.pack_propagate(False)
-
-    user_box = customtkinter.CTkFrame(header, fg_color="transparent")
-    user_box.pack(side="left", fill="x", expand=True)
-    customtkinter.CTkLabel(user_box, text="logged in as:", font=("Arial", 18)).pack(anchor="w", pady=(4, 0))
-    username = config_data.get("username") or "not logged in"
-    customtkinter.CTkLabel(user_box, text=username, font=("Arial", 20)).pack(anchor="w", pady=(0, 6))
-
-    info_frame = customtkinter.CTkFrame(wrapper, fg_color="transparent")
-    info_frame.pack(fill="x", pady=(0, 20))
-    customtkinter.CTkLabel(info_frame, text="plan: free trial (30 days left)", font=("Arial", 18)).pack(anchor="w", pady=(0, 4))
-    customtkinter.CTkLabel(info_frame, text="daily limit: 0 / 5 transcriptions", font=("Arial", 18)).pack(anchor="w")
-
-    def do_logout():
-        config_data.update({
-            "auth_token": None,
-            "username": None,
-            "use_external_server": None,
-            "onboarded": False,
-        })
-        save_config()
-        dlg.destroy()
-        root.after(50, show_initial_dialog)
-
-    customtkinter.CTkButton(wrapper, text="Account settings", width=360, command=lambda: None).pack(fill="x", pady=(0, 12))
-    customtkinter.CTkButton(wrapper, text="Log out", width=360, command=do_logout).pack(fill="x")
-
 
 def show_initial_dialog():
     global startup_dialog_active
@@ -1217,7 +1729,12 @@ def show_initial_dialog():
     dialog.title(i18n[current_ui_language]["title"])
     dialog.geometry("480x380")
     dialog.transient(root)
+    dialog.lift()
+    dialog.update_idletasks()
+    dialog.wait_visibility()
     dialog.grab_set()
+    dialog.focus_force()
+    dialog.bind("<Escape>", lambda _e: on_close())
 
     def on_close():
         nonlocal dialog
@@ -1307,7 +1824,19 @@ def show_register_dialog():
     reg.title(i18n[current_ui_language]["register_dialog_title"])
     reg.geometry("460x340")
     reg.transient(root)
+    reg.lift()
+    reg.update_idletasks()
+    reg.wait_visibility()
     reg.grab_set()
+    reg.focus_force()
+
+    def close_register(_e=None):
+        global startup_dialog_active
+        reg.destroy()
+        startup_dialog_active = False
+        root.after(50, show_initial_dialog)
+
+    reg.bind("<Escape>", close_register)
 
     customtkinter.CTkLabel(reg, text=i18n[current_ui_language]["register_dialog_title"], font=("Arial", 20)).pack(pady=(20, 12))
 
