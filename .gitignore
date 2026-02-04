@@ -211,3 +211,4 @@ server/temp/
 server/voicepecta.db
 
 recordings/
+config.json
