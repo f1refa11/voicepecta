@@ -1,26 +1,25 @@
 import tkinter
-import tkinter.ttk
+import tkinter.ttk as ttk
 from tkinter import filedialog, messagebox
 import customtkinter
 from PIL import Image
-import whisper
 import logging
 import threading
 import sys
 import io
 import re
-import torch
 import os
 import json
 import urllib.request
 import urllib.error
 import zipfile
 import numpy as np
-from vosk import Model as VoskModel, KaldiRecognizer, SetLogLevel
 from typing import Optional
 import sounddevice as sd
 import soundfile as sf
 from datetime import datetime
+
+log = logging.getLogger(__name__)
 
 # --- Globals ---
 audio_file_path = None
@@ -132,6 +131,214 @@ VOSK_MODELS = {
 }
 VOSK_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models", "vosk")
 
+# Override i18n with corrected translations and extra strings
+i18n = {
+    "en": {
+        "title": f"voicepecta v{VERSION}",
+        "select_audio_file": "Select Audio File",
+        "no_file_selected": "No file selected",
+        "whisper_model": "Whisper Model",
+        "transcribe": "Transcribe",
+        "transcribing": "Transcribing...",
+        "settings": "Settings",
+        "select_file_prompt": "Please select an audio file first.",
+        "error_transcription": "An error occurred: {e}",
+        "settings_title": "Options",
+        "ui_language": "UI Language",
+        "theme": "Appearance",
+        "downloading_model": "Downloading model...",
+        "downloading_model_prefix": "Downloading model: ",
+        "transcribing_prefix": "Transcribing: ",
+        "loading_audio": "Loading audio...",
+        "use_cpu": "Use CPU",
+        "engine": "Transcription Engine",
+        "vosk_model": "Vosk Model",
+        "download_prompt_title": "Download model?",
+        "download_prompt_body": "The model \"{model}\" is not downloaded yet.\nSize: {size}\nDo you want to download it now?",
+        "download_cancelled": "Download cancelled by user.",
+        "extracting_model": "Extracting model...",
+        "unknown_size": "Unknown size",
+        "record": "Record",
+        "stop_recording": "Stop",
+        "pause_recording": "Pause",
+        "resume_recording": "Resume",
+        "recording_status": "Recording...",
+        "recording_paused": "Recording paused",
+        "recording_saved": "Recording saved: {name}",
+        "mic_device": "Microphone",
+        "no_mic_devices": "No input devices found",
+        "language_label": "Language",
+        "account": "Account",
+        "account_settings": "Account settings",
+        "logout": "Log out",
+        "logged_in_as": "logged in as:",
+        "not_logged_in": "not logged in",
+        "plan_placeholder": "plan: free trial (30 days left)",
+        "limit_placeholder": "daily limit: 0 / 5 transcriptions",
+        "login_dialog_title": "log in to the voicepecta server",
+        "register_dialog_title": "register to voicepecta",
+        "login_label": "login:",
+        "password_label": "password:",
+        "enter_login_password": "enter login and password",
+        "contacting_server": "contacting server...",
+        "login_successful": "login successful",
+        "login_failed": "login failed: {reason}",
+        "registration_success": "registration complete. please log in.",
+        "registration_failed": "registration failed: {reason}",
+        "use_local_version": "use local version",
+        "quit_prompt": "do you want to quit voicepecta?",
+        "models_not_installed": "vosk and openai-whisper models are not installed. install them and try again",
+        "register_link": "register to voicepecta",
+        "login_link": "login to voicepecta",
+        "login_button": "log in",
+        "register_button": "register",
+        "login_first": "Please log in to the voicepecta server first.",
+    },
+    "ru": {
+        "title": f"voicepecta v{VERSION}",
+        "select_audio_file": "Выберите аудиофайл",
+        "no_file_selected": "Файл не выбран",
+        "whisper_model": "Модель Whisper",
+        "transcribe": "Транскрибировать",
+        "transcribing": "Транскрибация...",
+        "settings": "Настройки",
+        "select_file_prompt": "Пожалуйста, сначала выберите аудиофайл.",
+        "error_transcription": "Произошла ошибка: {e}",
+        "settings_title": "Настройки",
+        "ui_language": "Язык интерфейса",
+        "theme": "Оформление",
+        "downloading_model": "Загрузка модели...",
+        "downloading_model_prefix": "Загрузка модели: ",
+        "transcribing_prefix": "Транскрибция: ",
+        "loading_audio": "Загрузка аудио...",
+        "use_cpu": "Использовать ЦП",
+        "engine": "Движок транскрибации",
+        "vosk_model": "Модель Vosk",
+        "download_prompt_title": "Скачать модель?",
+        "download_prompt_body": "Модель \"{model}\" еще не скачана.\nРазмер: {size}\nСкачать сейчас?",
+        "download_cancelled": "Загрузка отменена.",
+        "extracting_model": "Распаковка модели...",
+        "unknown_size": "Неизвестный размер",
+        "record": "Запись",
+        "stop_recording": "Стоп",
+        "pause_recording": "Пауза",
+        "resume_recording": "Продолжить",
+        "recording_status": "Идет запись...",
+        "recording_paused": "Запись приостановлена",
+        "recording_saved": "Запись сохранена: {name}",
+        "mic_device": "Микрофон",
+        "no_mic_devices": "Устройства ввода не найдены",
+        "language_label": "Язык распознавания",
+        "account": "Аккаунт",
+        "account_settings": "Настройки аккаунта",
+        "logout": "Выйти",
+        "logged_in_as": "вы вошли как:",
+        "not_logged_in": "не авторизован",
+        "plan_placeholder": "тариф: пробный период (осталось 30 дней)",
+        "limit_placeholder": "дневной лимит: 0 / 5 транскрипций",
+        "login_dialog_title": "вход на сервер voicepecta",
+        "register_dialog_title": "регистрация в voicepecta",
+        "login_label": "логин:",
+        "password_label": "пароль:",
+        "enter_login_password": "введите логин и пароль",
+        "contacting_server": "соединение с сервером...",
+        "login_successful": "вход выполнен",
+        "login_failed": "не удалось войти: {reason}",
+        "registration_success": "регистрация завершена. войдите в систему.",
+        "registration_failed": "не удалось зарегистрироваться: {reason}",
+        "use_local_version": "использовать локальную версию",
+        "quit_prompt": "выйти из voicepecta?",
+        "models_not_installed": "Модели vosk и openai-whisper не установлены. Установите их и попробуйте снова.",
+        "register_link": "регистрация в voicepecta",
+        "login_link": "войти в voicepecta",
+        "login_button": "Войти",
+        "register_button": "Зарегистрироваться",
+        "login_first": "Сначала войдите в сервер voicepecta.",
+    }
+}
+# --- Config ---
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+DEFAULT_CONFIG = {
+    "ui_language": current_ui_language,
+    "theme": "Dark",
+    "engine": "Whisper",
+    "model": "base",
+    "transcription_language": "Russian",
+    "use_cpu": False,
+    "selected_mic_index": None,
+    "last_audio_file": None,
+    "use_external_server": None,  # None means not chosen yet
+    "auth_token": None,
+    "username": None,
+    "server_url": "http://127.0.0.1:8000",
+    "onboarded": False,
+}
+config_data = DEFAULT_CONFIG.copy()
+startup_dialog_active = False
+_whisper_module = None
+_torch_module = None
+_vosk_module = None
+
+
+def get_whisper():
+    global _whisper_module
+    if _whisper_module is None:
+        import whisper as _w
+        _whisper_module = _w
+    return _whisper_module
+
+
+def get_torch():
+    global _torch_module
+    if _torch_module is None:
+        import torch as _t
+        _torch_module = _t
+    return _torch_module
+
+
+def get_vosk():
+    global _vosk_module
+    if _vosk_module is None:
+        import vosk as _v
+        _vosk_module = _v
+    return _vosk_module
+
+
+def load_config():
+    global config_data, current_ui_language, selected_mic_index, audio_file_path
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                config_data.update(data)
+    except Exception as e:
+        log.debug(f"Using default config, could not load {CONFIG_PATH}: {e}")
+    current_ui_language = config_data.get("ui_language", "ru")
+    selected_mic_index = config_data.get("selected_mic_index")
+    audio_file_path = config_data.get("last_audio_file")
+    if audio_file_path and not os.path.exists(audio_file_path):
+        audio_file_path = None
+
+
+def get_language_code() -> Optional[str]:
+    lang = config_data.get("transcription_language", "Russian")
+    if lang == "Auto":
+        return None
+    if lang == "English":
+        return "en"
+    return "ru"
+
+
+def save_config():
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2)
+    except Exception as e:
+        log.warning(f"Failed to write config to {CONFIG_PATH}: {e}")
+
+
+load_config()
+
 # --- Progress Bar Handling ---
 class ProgressIOWrapper(object):
     def __init__(self, original_stream, progress_bar, progress_label, mode="download", total_duration=None):
@@ -192,6 +399,8 @@ class ProgressIOWrapper(object):
 def update_ui_language(lang_choice: str):
     global current_ui_language
     current_ui_language = "ru" if lang_choice == "Russian" else "en"
+    config_data["ui_language"] = current_ui_language
+    save_config()
     
     lang_dict = i18n[current_ui_language]
     root.title(lang_dict["title"])
@@ -207,8 +416,29 @@ def update_ui_language(lang_choice: str):
     settingsButton.configure(text=lang_dict["settings"])
     cpu_checkbox.configure(text=lang_dict["use_cpu"])
 
+def apply_ttk_theme(mode: str):
+    try:
+        style = ttk.Style()
+        themes = style.theme_names()
+        if mode.lower() == "light" and "sun-valley-light" in themes:
+            style.theme_use("sun-valley-light")
+        elif mode.lower() == "dark" and "sun-valley-dark" in themes:
+            style.theme_use("sun-valley-dark")
+        elif "sun-valley-dark" in themes:
+            style.theme_use("sun-valley-dark")
+    except Exception as e:
+        log.warning(f"Could not apply ttk theme: {e}")
+
+
 def change_theme(new_theme: str):
-    customtkinter.set_appearance_mode(new_theme)
+    try:
+        customtkinter.set_appearance_mode(new_theme)
+    except Exception as e:
+        log.warning(f"Could not change appearance mode to {new_theme}: {e}")
+        return
+    apply_ttk_theme(new_theme)
+    config_data["theme"] = new_theme
+    save_config()
 
 def open_settings_window():
     settings_win = customtkinter.CTkToplevel(root)
@@ -254,6 +484,8 @@ def select_audio_file():
     audio_file_path = filedialog.askopenfilename()
     if audio_file_path:
         selected_file_label.configure(text=audio_file_path.split("/")[-1])
+        config_data["last_audio_file"] = audio_file_path
+        save_config()
 
 def human_readable_size(num_bytes: Optional[int]) -> str:
     if num_bytes is None:
@@ -284,7 +516,7 @@ def get_remote_file_size(url: str) -> Optional[int]:
     return None
 
 def get_whisper_model_url(model_name: str) -> Optional[str]:
-    return whisper._MODELS.get(model_name)
+    return get_whisper()._MODELS.get(model_name)
 
 def get_whisper_model_path(model_name: str) -> Optional[str]:
     url = get_whisper_model_url(model_name)
@@ -371,15 +603,135 @@ def update_model_label():
         model_label.configure(text=i18n[current_ui_language]["whisper_model"])
 
 def update_model_options(engine_choice: str):
+    config_data["engine"] = engine_choice
     if engine_choice == "Vosk":
         modelOptionMenu.configure(values=list(VOSK_MODELS.keys()))
         modelOptionMenu.set("base model")
         cpu_checkbox.configure(state="disabled")
+        config_data["model"] = "base model"
     else:
         modelOptionMenu.configure(values=WHISPER_MODELS)
         modelOptionMenu.set("base")
         cpu_checkbox.configure(state="normal")
+        config_data["model"] = "base"
     update_model_label()
+    save_config()
+
+
+def on_model_selected(choice: str):
+    config_data["model"] = choice
+    save_config()
+
+
+def on_cpu_toggle():
+    config_data["use_cpu"] = bool(cpu_checkbox.get())
+    save_config()
+
+
+def build_server_url(path: str) -> str:
+    base = config_data.get("server_url") or DEFAULT_CONFIG["server_url"]
+    base = base.rstrip("/")
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{base}{path}"
+
+
+def _post_json(path: str, payload: dict) -> dict:
+    url = build_server_url(path)
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as response:
+        return json.load(response)
+
+
+def validate_token(token: str) -> bool:
+    try:
+        resp = _post_json("/v1/status", {"token": token})
+        return resp.get("status") == "ok"
+    except Exception as e:
+        log.error(f"Token validation failed: {e}")
+        return False
+
+
+def attempt_login_remote(login: str, password: str) -> tuple[bool, str]:
+    try:
+        resp = _post_json("/v1/auth/login", {"login": login, "password": password})
+    except Exception as e:
+        log.error(f"Login request failed: {e}")
+        return False, "network error"
+    if resp.get("status") == "ok" and resp.get("token"):
+        config_data.update({
+            "auth_token": resp.get("token"),
+            "username": login,
+            "use_external_server": True,
+            "onboarded": True,
+        })
+        save_config()
+        return True, ""
+    return False, "invalid credentials"
+
+
+def attempt_register_remote(login: str, password: str) -> tuple[bool, str]:
+    try:
+        resp = _post_json("/v1/auth/register", {"login": login, "password": password})
+    except Exception as e:
+        log.error(f"Register request failed: {e}")
+        return False, "network error"
+    if resp.get("status") == "ok":
+        return True, ""
+    return False, "failed"
+
+
+def check_local_dependencies() -> bool:
+    try:
+        import whisper  # noqa: F401
+        from vosk import Model as _  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def show_account_dialog():
+    dlg = customtkinter.CTkToplevel(root)
+    dlg.title(i18n[current_ui_language]["account"])
+    dlg.geometry("420x360")
+    dlg.transient(root)
+    dlg.grab_set()
+
+    wrapper = customtkinter.CTkFrame(dlg, fg_color="transparent")
+    wrapper.pack(fill="both", expand=True, padx=20, pady=20)
+
+    header = customtkinter.CTkFrame(wrapper, fg_color="transparent")
+    header.pack(fill="x", pady=(0, 12))
+
+    avatar = customtkinter.CTkFrame(header, width=70, height=70, corner_radius=40, border_width=2, fg_color="transparent")
+    avatar.pack(side="left", padx=(0, 12))
+    avatar.pack_propagate(False)
+
+    user_box = customtkinter.CTkFrame(header, fg_color="transparent")
+    user_box.pack(side="left", fill="x", expand=True)
+    customtkinter.CTkLabel(user_box, text=i18n[current_ui_language]["logged_in_as"], font=("Arial", 18)).pack(anchor="w", pady=(4, 0))
+    username = config_data.get("username") or i18n[current_ui_language]["not_logged_in"]
+    customtkinter.CTkLabel(user_box, text=username, font=("Arial", 20)).pack(anchor="w", pady=(0, 6))
+
+    info_frame = customtkinter.CTkFrame(wrapper, fg_color="transparent")
+    info_frame.pack(fill="x", pady=(0, 20))
+    customtkinter.CTkLabel(info_frame, text=i18n[current_ui_language]["plan_placeholder"], font=("Arial", 18)).pack(anchor="w", pady=(0, 4))
+    customtkinter.CTkLabel(info_frame, text=i18n[current_ui_language]["limit_placeholder"], font=("Arial", 18)).pack(anchor="w")
+
+    def do_logout():
+        config_data.update({
+            "auth_token": None,
+            "username": None,
+            "use_external_server": None,
+            "onboarded": False,
+        })
+        save_config()
+        dlg.destroy()
+        root.after(50, show_initial_dialog)
+
+    customtkinter.CTkButton(wrapper, text=i18n[current_ui_language]["account_settings"], width=360, command=lambda: None).pack(fill="x", pady=(0, 12))
+    customtkinter.CTkButton(wrapper, text=i18n[current_ui_language]["logout"], width=360, command=do_logout).pack(fill="x")
 
 def get_input_devices():
     devices = sd.query_devices()
@@ -399,6 +751,8 @@ def update_selected_mic(choice: str):
         selected_mic_index = int(choice.split(":")[0].strip())
     except Exception:
         selected_mic_index = None
+    config_data["selected_mic_index"] = selected_mic_index
+    save_config()
 
 def _recording_callback(indata, frames, time_info, status):
     if status:
@@ -469,6 +823,8 @@ def stop_recording(save: bool = True):
         filepath = os.path.join(recordings_dir, filename)
         sf.write(filepath, audio, 16000)
         audio_file_path = filepath
+        config_data["last_audio_file"] = audio_file_path
+        save_config()
         selected_file_label.configure(text=filename)
         result_textbox.delete("1.0", tkinter.END)
         result_textbox.insert(tkinter.END, i18n[current_ui_language]["recording_saved"].format(name=filename))
@@ -481,6 +837,10 @@ def transcribe():
     
     engine_choice = engineOptionMenu.get()
     model_choice = modelOptionMenu.get()
+    if config_data.get("use_external_server"):
+        transcribe_thread = threading.Thread(target=_do_transcribe_external, args=(engine_choice, model_choice))
+        transcribe_thread.start()
+        return
     if engine_choice == "Whisper":
         if not is_whisper_model_downloaded(model_choice):
             size_text = get_whisper_model_size_text(model_choice)
@@ -499,6 +859,103 @@ def transcribe():
     transcribe_thread = threading.Thread(target=_do_transcribe, args=(engine_choice, model_choice))
     transcribe_thread.start()
 
+def send_transcription_request(engine_choice: str, model_choice: str, token: str) -> str:
+    url = build_server_url("/v1/transcribe")
+    boundary = "----voicepectaBoundary" + os.urandom(8).hex()
+    body = io.BytesIO()
+
+    model_to_send = model_choice
+    if engine_choice.lower() == "vosk":
+        model_info = get_vosk_model_info(model_choice)
+        model_to_send = model_info.get("folder", model_choice)
+
+    fields = {
+        "engine": engine_choice,
+        "model": model_to_send,
+        "token": token,
+    }
+    language_code = get_language_code()
+    if language_code:
+        fields["language"] = language_code
+
+    for name, value in fields.items():
+        body.write(f"--{boundary}\r\n".encode("utf-8"))
+        body.write(f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8"))
+
+    with open(audio_file_path, "rb") as f:
+        file_content = f.read()
+
+    body.write(f"--{boundary}\r\n".encode("utf-8"))
+    body.write(
+        f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(audio_file_path)}"\r\n'.encode("utf-8")
+    )
+    body.write(b"Content-Type: application/octet-stream\r\n\r\n")
+    body.write(file_content)
+    body.write(b"\r\n")
+    body.write(f"--{boundary}--\r\n".encode("utf-8"))
+
+    data = body.getvalue()
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    req.add_header("Authorization", f"Bearer {token}")
+
+    result_text = ""
+    current_event = None
+    data_lines = []
+
+    with urllib.request.urlopen(req, timeout=120) as response:
+        for raw_line in response:
+            line = raw_line.decode("utf-8").strip()
+            if not line:
+                if current_event == "result":
+                    result_text = "\n".join(data_lines)
+                elif current_event == "error":
+                    raise RuntimeError("\n".join(data_lines) or "server error")
+                current_event = None
+                data_lines = []
+                continue
+            if line.startswith("event:"):
+                current_event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                payload = line.split(":", 1)[1].strip()
+                if current_event == "status":
+                    progress_label.configure(text=payload)
+                    root.update_idletasks()
+                data_lines.append(payload)
+
+    if result_text:
+        return result_text
+    raise RuntimeError("No result received from server")
+
+
+def _do_transcribe_external(engine_choice: str, model_choice: str):
+    lang_dict = i18n[current_ui_language]
+    transcribeButton.configure(text=lang_dict["transcribing"], state="disabled")
+    result_textbox.delete("1.0", tkinter.END)
+    
+    progress_bar.pack(pady=(5, 10), padx=10, fill="x")
+    progress_label.pack(pady=(0, 10), padx=10)
+    progress_bar.set(0)
+
+    token = config_data.get("auth_token")
+    if not token:
+        result_textbox.insert(tkinter.END, i18n[current_ui_language]["login_first"])
+        transcribeButton.configure(text=lang_dict["transcribe"], state="normal")
+        progress_bar.pack_forget()
+        progress_label.pack_forget()
+        return
+
+    try:
+        result_text = send_transcription_request(engine_choice, model_choice, token)
+        result_textbox.insert(tkinter.END, result_text)
+    except Exception as e:
+        log.error(f"External transcription failed: {e}")
+        result_textbox.insert(tkinter.END, lang_dict["error_transcription"].format(e=e))
+    finally:
+        transcribeButton.configure(text=lang_dict["transcribe"], state="normal")
+        progress_bar.pack_forget()
+        progress_label.pack_forget()
+
 def _do_transcribe(engine_choice: str, model_choice: str):
     lang_dict = i18n[current_ui_language]
     transcribeButton.configure(text=lang_dict["transcribing"], state="disabled")
@@ -510,6 +967,8 @@ def _do_transcribe(engine_choice: str, model_choice: str):
     
     try:
         if engine_choice == "Whisper":
+            whisper = get_whisper()
+            torch = get_torch()
             original_stderr = sys.stderr
             sys.stderr = ProgressIOWrapper(original_stderr, progress_bar, progress_label, mode="download")
             model = None
@@ -531,11 +990,14 @@ def _do_transcribe(engine_choice: str, model_choice: str):
                 
                 sys.stdout = ProgressIOWrapper(original_stdout, progress_bar, progress_label, mode="transcribe", total_duration=duration)
                 
-                result = model.transcribe(audio, language="russian", verbose=True)
+                language_code = get_language_code()
+                result = model.transcribe(audio, language=language_code, verbose=True)
                 result_textbox.insert(tkinter.END, result["text"])
             finally:
                 sys.stdout = original_stdout
         else:
+            whisper = get_whisper()
+            vosk = get_vosk()
             if not is_vosk_model_downloaded(model_choice):
                 download_and_extract_vosk(model_choice)
             progress_label.configure(text=lang_dict["loading_audio"])
@@ -546,8 +1008,8 @@ def _do_transcribe(engine_choice: str, model_choice: str):
             total_samples = len(audio_int16)
             model_info = get_vosk_model_info(model_choice)
             model_dir = os.path.join(VOSK_MODEL_DIR, model_info["folder"])
-            SetLogLevel(-1)
-            recognizer = KaldiRecognizer(VoskModel(model_dir), whisper.audio.SAMPLE_RATE)
+            vosk.SetLogLevel(-1)
+            recognizer = vosk.KaldiRecognizer(vosk.Model(model_dir), whisper.audio.SAMPLE_RATE)
             chunk_size = 4000
             for i in range(0, total_samples, chunk_size):
                 chunk = audio_int16[i:i + chunk_size]
@@ -574,21 +1036,25 @@ def _do_transcribe(engine_choice: str, model_choice: str):
         progress_label.pack_forget()
 
 # --- UI Setup ---
-customtkinter.set_appearance_mode("Dark")
+initial_theme = config_data.get("theme", "Dark")
+try:
+    customtkinter.set_appearance_mode(initial_theme)
+except Exception as e:
+    log.warning(f"Could not set initial appearance mode {initial_theme}: {e}")
+    customtkinter.set_appearance_mode("Dark")
 customtkinter.set_default_color_theme("blue")
 
 root = customtkinter.CTk()
-root.geometry("750x500")
+root.geometry("750x715")
 root.title(i18n[current_ui_language]["title"])
 root.resizable(True, True)
 
 # Load custom theme
-try:
-    root.tk.call("source", "assets/theme/dark.tcl")
-    style = tkinter.ttk.Style()
-    style.theme_use("sun-valley-dark")
-except Exception as e:
-    logging.warning(f"Could not load custom theme: {e}")
+# try:
+#     root.tk.call("source", "assets/theme/dark.tcl")
+#     apply_ttk_theme(initial_theme)
+# except Exception as e:
+#     logging.warning(f"Could not load custom theme: {e}")
 
 # --- Main layout frames ---
 left_frame = customtkinter.CTkFrame(root, width=250)
@@ -615,24 +1081,62 @@ selectFileButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_lang
 selectFileButton.pack(pady=10, padx=10, fill="x")
 
 selected_file_label = customtkinter.CTkLabel(left_frame, text=i18n[current_ui_language]["no_file_selected"], wraplength=230, justify="center")
+if audio_file_path:
+    selected_file_label.configure(text=os.path.basename(audio_file_path))
 selected_file_label.pack(pady=5, padx=10)
 
 engine_label = customtkinter.CTkLabel(left_frame, text=i18n[current_ui_language]["engine"])
 engine_label.pack(pady=(20, 5), padx=10)
 
+initial_engine = config_data.get("engine", "Whisper")
+if initial_engine not in ENGINE_OPTIONS:
+    initial_engine = "Whisper"
+
 engineOptionMenu = customtkinter.CTkComboBox(left_frame, values=ENGINE_OPTIONS, command=update_model_options)
-engineOptionMenu.set("Whisper")
+engineOptionMenu.set(initial_engine)
 engineOptionMenu.pack(pady=5, padx=10, fill="x")
+
+lang_label = customtkinter.CTkLabel(left_frame, text=i18n[current_ui_language]["language_label"])
+lang_label.pack(pady=(12, 5), padx=10)
+LANG_OPTIONS = ["Russian", "Auto", "English"]
+initial_lang = config_data.get("transcription_language", "Russian")
+if initial_lang not in LANG_OPTIONS:
+    initial_lang = "Russian"
+
+def on_language_selected(choice: str):
+    config_data["transcription_language"] = choice
+    save_config()
+
+language_combo = customtkinter.CTkComboBox(left_frame, values=LANG_OPTIONS, command=on_language_selected)
+language_combo.set(initial_lang)
+language_combo.pack(pady=5, padx=10, fill="x")
 
 model_label = customtkinter.CTkLabel(left_frame, text=i18n[current_ui_language]["whisper_model"])
 model_label.pack(pady=(20, 5), padx=10)
 
-modelOptionMenu = customtkinter.CTkComboBox(left_frame, values=WHISPER_MODELS)
-modelOptionMenu.set("base")
+if initial_engine == "Vosk":
+    model_values = list(VOSK_MODELS.keys())
+    initial_model = config_data.get("model", "base model")
+    if initial_model not in model_values:
+        initial_model = model_values[0]
+else:
+    model_values = WHISPER_MODELS
+    initial_model = config_data.get("model", "base")
+    if initial_model not in model_values:
+        initial_model = "base"
+
+modelOptionMenu = customtkinter.CTkComboBox(left_frame, values=model_values, command=on_model_selected)
+modelOptionMenu.set(initial_model)
 modelOptionMenu.pack(pady=5, padx=10, fill="x")
 
-cpu_checkbox = customtkinter.CTkCheckBox(left_frame, text=i18n[current_ui_language]["use_cpu"])
+cpu_checkbox = customtkinter.CTkCheckBox(left_frame, text=i18n[current_ui_language]["use_cpu"], command=on_cpu_toggle)
+if config_data.get("use_cpu"):
+    cpu_checkbox.select()
 cpu_checkbox.pack(pady=10, padx=10)
+
+if initial_engine == "Vosk":
+    model_label.configure(text=i18n[current_ui_language]["vosk_model"])
+    cpu_checkbox.configure(state="disabled")
 
 transcribeButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["transcribe"], command=transcribe)
 transcribeButton.pack(side="bottom", pady=10, padx=10, fill="x")
@@ -651,10 +1155,237 @@ settingsButton.pack(side="bottom", pady=(0,10), padx=10, fill="x")
 
 # --- Right frame widgets ---
 result_textbox = customtkinter.CTkTextbox(right_frame, wrap="word")
+account_button = customtkinter.CTkButton(right_frame, text=i18n[current_ui_language]["account"], command=show_account_dialog)
+account_button.pack(fill="x", padx=5, pady=(5, 0))
+
+result_textbox = customtkinter.CTkTextbox(right_frame, wrap="word")
 result_textbox.pack(fill="both", expand=True, padx=5, pady=5)
 
 progress_bar = customtkinter.CTkProgressBar(right_frame, mode="determinate")
 progress_label = customtkinter.CTkLabel(right_frame, text="")
+
+def show_account_dialog():
+    dlg = customtkinter.CTkToplevel(root)
+    dlg.title("Account")
+    dlg.geometry("420x360")
+    dlg.transient(root)
+    dlg.grab_set()
+
+    wrapper = customtkinter.CTkFrame(dlg, fg_color="transparent")
+    wrapper.pack(fill="both", expand=True, padx=20, pady=20)
+
+    header = customtkinter.CTkFrame(wrapper, fg_color="transparent")
+    header.pack(fill="x", pady=(0, 12))
+
+    avatar = customtkinter.CTkFrame(header, width=70, height=70, corner_radius=40, border_width=2, fg_color="transparent")
+    avatar.pack(side="left", padx=(0, 12))
+    avatar.pack_propagate(False)
+
+    user_box = customtkinter.CTkFrame(header, fg_color="transparent")
+    user_box.pack(side="left", fill="x", expand=True)
+    customtkinter.CTkLabel(user_box, text="logged in as:", font=("Arial", 18)).pack(anchor="w", pady=(4, 0))
+    username = config_data.get("username") or "not logged in"
+    customtkinter.CTkLabel(user_box, text=username, font=("Arial", 20)).pack(anchor="w", pady=(0, 6))
+
+    info_frame = customtkinter.CTkFrame(wrapper, fg_color="transparent")
+    info_frame.pack(fill="x", pady=(0, 20))
+    customtkinter.CTkLabel(info_frame, text="plan: free trial (30 days left)", font=("Arial", 18)).pack(anchor="w", pady=(0, 4))
+    customtkinter.CTkLabel(info_frame, text="daily limit: 0 / 5 transcriptions", font=("Arial", 18)).pack(anchor="w")
+
+    def do_logout():
+        config_data.update({
+            "auth_token": None,
+            "username": None,
+            "use_external_server": None,
+            "onboarded": False,
+        })
+        save_config()
+        dlg.destroy()
+        root.after(50, show_initial_dialog)
+
+    customtkinter.CTkButton(wrapper, text="Account settings", width=360, command=lambda: None).pack(fill="x", pady=(0, 12))
+    customtkinter.CTkButton(wrapper, text="Log out", width=360, command=do_logout).pack(fill="x")
+
+
+def show_initial_dialog():
+    global startup_dialog_active
+    if startup_dialog_active:
+        return
+    startup_dialog_active = True
+
+    dialog = customtkinter.CTkToplevel(root)
+    dialog.title(i18n[current_ui_language]["title"])
+    dialog.geometry("480x380")
+    dialog.transient(root)
+    dialog.grab_set()
+
+    def on_close():
+        nonlocal dialog
+        if messagebox.askyesno(i18n[current_ui_language]["title"], i18n[current_ui_language]["quit_prompt"]):
+            root.destroy()
+        else:
+            dialog.deiconify()
+    dialog.protocol("WM_DELETE_WINDOW", on_close)
+
+    customtkinter.CTkLabel(dialog, text=i18n[current_ui_language]["login_dialog_title"], font=("Arial", 20)).pack(pady=(25, 15))
+
+    form_frame = customtkinter.CTkFrame(dialog, fg_color="transparent")
+    form_frame.pack(pady=10, padx=25, fill="x")
+
+    login_row = customtkinter.CTkFrame(form_frame, fg_color="transparent")
+    login_row.pack(fill="x", pady=(0, 10))
+    customtkinter.CTkLabel(login_row, text=i18n[current_ui_language]["login_label"], font=("Arial", 16), width=90, anchor="e").grid(row=0, column=0, padx=(0, 8))
+    login_entry = customtkinter.CTkEntry(login_row, width=260)
+    login_entry.grid(row=0, column=1, sticky="ew")
+    login_row.grid_columnconfigure(1, weight=1)
+
+    password_row = customtkinter.CTkFrame(form_frame, fg_color="transparent")
+    password_row.pack(fill="x", pady=(0, 10))
+    customtkinter.CTkLabel(password_row, text=i18n[current_ui_language]["password_label"], font=("Arial", 16), width=90, anchor="e").grid(row=0, column=0, padx=(0, 8))
+    password_entry = customtkinter.CTkEntry(password_row, show="*", width=260)
+    password_entry.grid(row=0, column=1, sticky="ew")
+    password_row.grid_columnconfigure(1, weight=1)
+
+    status_label = customtkinter.CTkLabel(dialog, text="", text_color="#bbbbbb")
+    status_label.pack()
+
+    def handle_login():
+        global startup_dialog_active
+        login = login_entry.get().strip()
+        password = password_entry.get().strip()
+        if not login or not password:
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["enter_login_password"])
+            return
+        status_label.configure(text=i18n[current_ui_language]["contacting_server"])
+        dialog.update_idletasks()
+        ok, reason = attempt_login_remote(login, password)
+        if ok:
+            status_label.configure(text=i18n[current_ui_language]["login_successful"])
+            dialog.destroy()
+            startup_dialog_active = False
+        else:
+            status_label.configure(text="")
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["login_failed"].format(reason=reason))
+
+    customtkinter.CTkButton(dialog, text=i18n[current_ui_language]["login_button"], command=handle_login, width=320).pack(pady=(10, 12))
+
+    register_link = customtkinter.CTkLabel(dialog, text=i18n[current_ui_language]["register_link"], text_color="#3b4acb",
+                                           cursor="hand2", font=("Arial", 16, "underline"))
+    register_link.pack(pady=(5, 8))
+    def go_register(_e=None):
+        global startup_dialog_active
+        dialog.destroy()
+        startup_dialog_active = False
+        show_register_dialog()
+    register_link.bind("<Button-1>", go_register)
+
+    ttk.Separator(dialog, orient="horizontal").pack(fill="x", pady=(12, 12), padx=20)
+
+    def handle_local():
+        global startup_dialog_active
+        nonlocal dialog
+        if check_local_dependencies():
+            config_data.update({
+                "use_external_server": False,
+                "auth_token": None,
+                "onboarded": True,
+            })
+            save_config()
+            dialog.destroy()
+            startup_dialog_active = False
+        else:
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["models_not_installed"])
+            dialog.destroy()
+            startup_dialog_active = False
+            root.after(50, show_initial_dialog)
+
+    customtkinter.CTkButton(dialog, text=i18n[current_ui_language]["use_local_version"], command=handle_local, width=340).pack(pady=(12, 16))
+
+def show_register_dialog():
+    global startup_dialog_active
+    reg = customtkinter.CTkToplevel(root)
+    reg.title(i18n[current_ui_language]["register_dialog_title"])
+    reg.geometry("460x340")
+    reg.transient(root)
+    reg.grab_set()
+
+    customtkinter.CTkLabel(reg, text=i18n[current_ui_language]["register_dialog_title"], font=("Arial", 20)).pack(pady=(20, 12))
+
+    form_frame = customtkinter.CTkFrame(reg, fg_color="transparent")
+    form_frame.pack(pady=10, padx=25, fill="x")
+
+    login_row = customtkinter.CTkFrame(form_frame, fg_color="transparent")
+    login_row.pack(fill="x", pady=(0, 10))
+    customtkinter.CTkLabel(login_row, text=i18n[current_ui_language]["login_label"], font=("Arial", 16), width=90, anchor="e").grid(row=0, column=0, padx=(0, 8))
+    login_entry = customtkinter.CTkEntry(login_row, width=240)
+    login_entry.grid(row=0, column=1, sticky="ew")
+    login_row.grid_columnconfigure(1, weight=1)
+
+    password_row = customtkinter.CTkFrame(form_frame, fg_color="transparent")
+    password_row.pack(fill="x", pady=(0, 12))
+    customtkinter.CTkLabel(password_row, text=i18n[current_ui_language]["password_label"], font=("Arial", 16), width=90, anchor="e").grid(row=0, column=0, padx=(0, 8))
+    password_entry = customtkinter.CTkEntry(password_row, show="*", width=240)
+    password_entry.grid(row=0, column=1, sticky="ew")
+    password_row.grid_columnconfigure(1, weight=1)
+
+    status_label = customtkinter.CTkLabel(reg, text="", text_color="#bbbbbb")
+    status_label.pack()
+
+    def submit_registration():
+        global startup_dialog_active
+        login = login_entry.get().strip()
+        password = password_entry.get().strip()
+        if not login or not password:
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["enter_login_password"])
+            return
+        status_label.configure(text=i18n[current_ui_language]["contacting_server"])
+        reg.update_idletasks()
+        ok, reason = attempt_register_remote(login, password)
+        if ok:
+            messagebox.showinfo(i18n[current_ui_language]["title"], i18n[current_ui_language]["registration_success"])
+            startup_dialog_active = False
+            reg.destroy()
+            show_initial_dialog()
+        else:
+            status_label.configure(text="")
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["registration_failed"].format(reason=reason))
+
+    customtkinter.CTkButton(reg, text=i18n[current_ui_language]["register_button"], command=submit_registration, width=300).pack(pady=(6, 10))
+
+    login_link = customtkinter.CTkLabel(reg, text=i18n[current_ui_language]["login_link"], text_color="#3b4acb", cursor="hand2",
+                                        font=("Arial", 16, "underline"))
+    login_link.pack(pady=(4, 8))
+    login_link.bind("<Button-1>", lambda _e: (reg.destroy(), show_initial_dialog()))
+
+    ttk.Separator(reg, orient="horizontal").pack(fill="x", pady=(8, 10), padx=20)
+
+    def handle_local_reg():
+        if check_local_dependencies():
+            config_data.update({
+                "use_external_server": False,
+                "auth_token": None,
+                "onboarded": True,
+            })
+            save_config()
+            reg.destroy()
+            startup_dialog_active = False
+        else:
+            messagebox.showerror(i18n[current_ui_language]["title"], i18n[current_ui_language]["models_not_installed"])
+            reg.destroy()
+            startup_dialog_active = False
+            root.after(50, show_initial_dialog)
+
+    customtkinter.CTkButton(reg, text=i18n[current_ui_language]["use_local_version"], command=handle_local_reg, width=300).pack(pady=(6, 14))
+
+
+def maybe_show_startup_dialog():
+    need_dialog = not config_data.get("onboarded", False)
+    if config_data.get("use_external_server"):
+        token = config_data.get("auth_token")
+        if not (token and validate_token(token)):
+            need_dialog = True
+    if need_dialog:
+        root.after(150, show_initial_dialog)
 
 # --- Logging ---
 log = logging.getLogger(__name__)
@@ -664,5 +1395,6 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 log.addHandler(handler)
 
+maybe_show_startup_dialog()
 log.info("App Ready")
 root.mainloop()

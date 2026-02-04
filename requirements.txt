@@ -4,3 +4,7 @@ pillow==11.3.0
 vosk==0.3.45
 sounddevice==0.5.2
 soundfile==0.13.1
+fastapi==0.115.8
+uvicorn==0.35.0
+PyJWT==2.10.1
+python-multipart==0.0.20
