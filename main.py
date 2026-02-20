@@ -1,7 +1,7 @@
 import tkinter
 import tkinter
 import tkinter.ttk as ttk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 import customtkinter
 from PIL import Image, ImageDraw, ImageOps
 import logging
@@ -11,6 +11,7 @@ import io
 import re
 import os
 import json
+import math
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -39,7 +40,11 @@ profile_preview_path: Optional[str] = None
 remote_transcribe_job_id: Optional[str] = None
 remote_transcribe_active = False
 account_dialog: Optional[customtkinter.CTkToplevel] = None
+token_estimate_label: Optional[customtkinter.CTkLabel] = None
 selected_mic_index = None
+selected_audio_duration_seconds: Optional[float] = None
+trial_expired_dialog: Optional[customtkinter.CTkToplevel] = None
+remote_status_cache: dict[str, Any] = {}
 VERSION = "0.0.4"
 current_ui_language = "ru"
 
@@ -79,6 +84,48 @@ i18n = {
         "recording_saved": "Recording saved: {name}",
         "mic_device": "Microphone",
         "no_mic_devices": "No input devices found",
+        "language_label": "Language",
+        "account": "Account",
+        "account_settings": "Account settings",
+        "logout": "Log out",
+        "logged_in_as": "logged in as:",
+        "not_logged_in": "not logged in",
+        "plan_placeholder": "plan: trial",
+        "limit_placeholder": "tokens: {balance} / {limit} (resets: {reset_at})",
+        "whisper_segment_toggle": "Whisper timestamps/new lines",
+        "token_estimate_placeholder": "Estimated cost: select a file",
+        "token_estimate_value": "Estimated cost: {tokens} tokens ({rate}/sec, {duration})",
+        "token_insufficient_title": "Not enough tokens",
+        "token_insufficient_body": "You do not have enough tokens for this transcription.\nBalance: {balance}\nRequired: {required}\nNeed more: {missing}",
+        "token_balance_label": "Token balance: {balance} / {limit}",
+        "token_reset_label": "Resets at: {reset_at}",
+        "token_reset_unknown": "unknown",
+        "trial_plan_active": "Plan: Trial (expires {expires_at})",
+        "trial_plan_expired": "Plan: Trial (expired)",
+        "trial_plan_no_expiry": "Plan: Trial (no expiry)",
+        "trial_expired_title": "Trial expired",
+        "trial_expired_message": "Your trial plan has expired. You can delete your account or upgrade to Pro.",
+        "upgrade_to_pro": "Upgrade to Pro",
+        "upgrade_not_implemented": "Pro plan is not implemented yet.",
+        "delete_account_button": "Delete account",
+        "login_dialog_title": "log in to the Voicepecta server",
+        "register_dialog_title": "register to Voicepecta",
+        "login_label": "login:",
+        "password_label": "password:",
+        "enter_login_password": "enter login and password",
+        "contacting_server": "contacting server...",
+        "login_successful": "login successful",
+        "login_failed": "login failed: {reason}",
+        "registration_success": "registration complete. please log in.",
+        "registration_failed": "registration failed: {reason}",
+        "use_local_version": "use local version",
+        "quit_prompt": "do you want to quit Voicepecta?",
+        "models_not_installed": "vosk and openai-whisper models are not installed. install them and try again",
+        "register_link": "register to Voicepecta",
+        "login_link": "login to Voicepecta",
+        "login_button": "log in",
+        "register_button": "register",
+        "login_first": "Please log in to the Voicepecta server first.",
         "account_settings_dialog_title": "Account settings",
         "change_profile_picture": "Change profile picture",
         "choose_image": "Choose image",
@@ -138,188 +185,30 @@ i18n = {
         "recording_saved": "Запись сохранена: {name}",
         "mic_device": "Микрофон",
         "no_mic_devices": "Устройства ввода не найдены",
-        "account_settings_dialog_title": "Настройки аккаунта",
-        "change_profile_picture": "Сменить аватар",
-        "choose_image": "Выбрать изображение",
-        "save_profile_picture": "Сохранить аватар",
-        "change_password": "Сменить пароль",
-        "current_password": "Текущий пароль",
-        "new_password": "Новый пароль",
-        "confirm_new_password": "Повторите пароль",
-        "save_password": "Сохранить пароль",
-        "delete_account": "Удалить аккаунт",
-        "delete_account_confirm": "Вы уверены, что хотите удалить аккаунт? Это действие необратимо!",
-        "delete_account_checkbox": "Я понимаю, что удалю аккаунт навсегда",
-        "destroy_account": "Удалить аккаунт",
-        "account_deleted": "Аккаунт удален. Спасибо, что использовали Voicepecta!",
-        "profile_pic_saved": "Аватар обновлен",
-        "password_saved": "Пароль обновлен",
-        "password_mismatch": "Новые пароли не совпадают",
-        "password_required": "Заполните все поля пароля",
-        "image_required": "Сначала выберите изображение",
-        "image_invalid": "Не удалось обработать изображение",
-        "delete_account_failed": "Не удалось удалить аккаунт: {reason}",
-        "profile_pic_failed": "Не удалось обновить аватар: {reason}",
-        "password_change_failed": "Не удалось сменить пароль: {reason}",
-        "quit_prompt_transcribing": "Задача транскрибации еще выполняется. Вы уверены, что хотите выйти из Voicepecta?",
-    }
-}
-
-WHISPER_MODELS = ["tiny", "base", "small", "medium", "large", "turbo"]
-ENGINE_OPTIONS = ["Whisper", "Vosk"]
-VOSK_MODELS = {
-    "base model": {
-        "folder": "vosk-model-ru-0.42",
-        "url": "https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip",
-        "size": "1.8 GB",
-    },
-    "lite model": {
-        "folder": "vosk-model-small-ru-0.22",
-        "url": "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip",
-        "size": "45 MB",
-    },
-    "(legacy) base model": {
-        "folder": "vosk-model-ru-0.22",
-        "url": "https://alphacephei.com/vosk/models/vosk-model-ru-0.22.zip",
-        "size": "1.5 GB",
-    },
-    "(legacy) large model": {
-        "folder": "vosk-model-ru-0.10",
-        "url": "https://alphacephei.com/vosk/models/vosk-model-ru-0.10.zip",
-        "size": "2.5 GB",
-    },
-}
-VOSK_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models", "vosk")
-
-# Override i18n with corrected translations and extra strings
-i18n = {
-    "en": {
-        "title": f"Voicepecta v{VERSION}",
-        "select_audio_file": "Select Audio File",
-        "no_file_selected": "No file selected",
-        "whisper_model": "Whisper Model",
-        "transcribe": "Transcribe",
-        "transcribing": "Transcribing...",
-        "settings": "Settings",
-        "select_file_prompt": "Please select an audio file first.",
-        "error_transcription": "An error occurred: {e}",
-        "settings_title": "Options",
-        "ui_language": "UI Language",
-        "theme": "Appearance",
-        "downloading_model": "Downloading model...",
-        "downloading_model_prefix": "Downloading model: ",
-        "transcribing_prefix": "Transcribing: ",
-        "loading_audio": "Loading audio...",
-        "use_cpu": "Use CPU",
-        "engine": "Transcription Engine",
-        "vosk_model": "Vosk Model",
-        "download_prompt_title": "Download model?",
-        "download_prompt_body": "The model \"{model}\" is not downloaded yet.\nSize: {size}\nDo you want to download it now?",
-        "download_cancelled": "Download cancelled by user.",
-        "extracting_model": "Extracting model...",
-        "unknown_size": "Unknown size",
-        "record": "Record",
-        "stop_recording": "Stop",
-        "pause_recording": "Pause",
-        "resume_recording": "Resume",
-        "recording_status": "Recording...",
-        "recording_paused": "Recording paused",
-        "recording_saved": "Recording saved: {name}",
-        "mic_device": "Microphone",
-        "no_mic_devices": "No input devices found",
-        "language_label": "Language",
-        "account": "Account",
-        "account_settings": "Account settings",
-        "logout": "Log out",
-        "logged_in_as": "logged in as:",
-        "not_logged_in": "not logged in",
-        "plan_placeholder": "plan: free trial (30 days left)",
-        "limit_placeholder": "daily limit: {used} / {limit} transcriptions used (resets daily)",
-        "login_dialog_title": "log in to the Voicepecta server",
-        "register_dialog_title": "register to Voicepecta",
-        "login_label": "login:",
-        "password_label": "password:",
-        "enter_login_password": "enter login and password",
-        "contacting_server": "contacting server...",
-        "login_successful": "login successful",
-        "login_failed": "login failed: {reason}",
-        "registration_success": "registration complete. please log in.",
-        "registration_failed": "registration failed: {reason}",
-        "use_local_version": "use local version",
-        "quit_prompt": "do you want to quit Voicepecta?",
-        "models_not_installed": "vosk and openai-whisper models are not installed. install them and try again",
-        "register_link": "register to Voicepecta",
-        "login_link": "login to Voicepecta",
-        "login_button": "log in",
-        "register_button": "register",
-        "login_first": "Please log in to the Voicepecta server first.",
-        "account_settings_dialog_title": "Account settings",
-        "change_profile_picture": "Change profile picture",
-        "choose_image": "Choose image",
-        "save_profile_picture": "Save profile picture",
-        "change_password": "Change password",
-        "current_password": "Current password",
-        "new_password": "New password",
-        "confirm_new_password": "New password again",
-        "save_password": "Save password",
-        "delete_account": "Delete account",
-        "delete_account_confirm": "Are you SURE that you want to delete your account? This action is irreversible!",
-        "delete_account_checkbox": "I'm aware this action is irreversible and I would lose my account forever",
-        "destroy_account": "Destroy account",
-        "account_deleted": "The account has been deleted. Thanks for using Voicepecta!",
-        "profile_pic_saved": "Profile picture updated",
-        "password_saved": "Password updated",
-        "password_mismatch": "New passwords do not match",
-        "password_required": "Please fill all password fields",
-        "image_required": "Please choose an image first",
-        "image_invalid": "Could not process image",
-        "delete_account_failed": "Account deletion failed: {reason}",
-        "profile_pic_failed": "Profile picture update failed: {reason}",
-        "password_change_failed": "Password change failed: {reason}",
-        "quit_prompt_transcribing": "The transcribing job is still running. Are you sure you want to quit Voicepecta?",
-    },
-    "ru": {
-        "title": f"Voicepecta v{VERSION}",
-        "select_audio_file": "Выберите аудиофайл",
-        "no_file_selected": "Файл не выбран",
-        "whisper_model": "Модель Whisper",
-        "transcribe": "Транскрибировать",
-        "transcribing": "Транскрибация...",
-        "settings": "Настройки",
-        "select_file_prompt": "Пожалуйста, сначала выберите аудиофайл.",
-        "error_transcription": "Произошла ошибка: {e}",
-        "settings_title": "Настройки",
-        "ui_language": "Язык интерфейса",
-        "theme": "Оформление",
-        "downloading_model": "Загрузка модели...",
-        "downloading_model_prefix": "Загрузка модели: ",
-        "transcribing_prefix": "Транскрибция: ",
-        "loading_audio": "Загрузка аудио...",
-        "use_cpu": "Использовать ЦП",
-        "engine": "Движок транскрибации",
-        "vosk_model": "Модель Vosk",
-        "download_prompt_title": "Скачать модель?",
-        "download_prompt_body": "Модель \"{model}\" еще не скачана.\nРазмер: {size}\nСкачать сейчас?",
-        "download_cancelled": "Загрузка отменена.",
-        "extracting_model": "Распаковка модели...",
-        "unknown_size": "Неизвестный размер",
-        "record": "Запись",
-        "stop_recording": "Стоп",
-        "pause_recording": "Пауза",
-        "resume_recording": "Продолжить",
-        "recording_status": "Идет запись...",
-        "recording_paused": "Запись приостановлена",
-        "recording_saved": "Запись сохранена: {name}",
-        "mic_device": "Микрофон",
-        "no_mic_devices": "Устройства ввода не найдены",
         "language_label": "Язык распознавания",
         "account": "Аккаунт",
         "account_settings": "Настройки аккаунта",
         "logout": "Выйти",
         "logged_in_as": "Вы вошли как:",
         "not_logged_in": "Не авторизован",
-        "plan_placeholder": "Тариф: пробный период (осталось 30 дней)",
-        "limit_placeholder": "Дневной лимит: {used} / {limit} транскрипций использовано (сбрасывается ежедневно)",
+        "plan_placeholder": "Тариф: пробный",
+        "limit_placeholder": "Токены: {balance} / {limit} (сброс: {reset_at})",
+        "whisper_segment_toggle": "Whisper: таймкоды/переносы",
+        "token_estimate_placeholder": "Оценка стоимости: выберите файл",
+        "token_estimate_value": "Оценка стоимости: {tokens} токенов ({rate}/сек, {duration})",
+        "token_insufficient_title": "Недостаточно токенов",
+        "token_insufficient_body": "Недостаточно токенов для этой транскрибации.\nБаланс: {balance}\nТребуется: {required}\nНужно добавить: {missing}",
+        "token_balance_label": "Баланс токенов: {balance} / {limit}",
+        "token_reset_label": "Сброс: {reset_at}",
+        "token_reset_unknown": "неизвестно",
+        "trial_plan_active": "Тариф: пробный (до {expires_at})",
+        "trial_plan_expired": "Тариф: пробный (истек)",
+        "trial_plan_no_expiry": "Тариф: пробный (без срока)",
+        "trial_expired_title": "Пробный период истек",
+        "trial_expired_message": "Ваш пробный период истек. Вы можете удалить аккаунт или перейти на Pro.",
+        "upgrade_to_pro": "Перейти на Pro",
+        "upgrade_not_implemented": "Тариф Pro пока не реализован.",
+        "delete_account_button": "Удалить аккаунт",
         "login_dialog_title": "Вход на сервер Voicepecta",
         "register_dialog_title": "Регистрация в Voicepecta",
         "login_label": "Логин:",
@@ -364,6 +253,55 @@ i18n = {
         "quit_prompt_transcribing": "Задача транскрибации еще выполняется. Вы уверены, что хотите выйти из Voicepecta?",
     }
 }
+
+WHISPER_MODELS = ["tiny", "base", "small", "medium", "large", "turbo"]
+ENGINE_OPTIONS = ["Whisper", "Vosk"]
+VOSK_MODELS = {
+    "base model": {
+        "folder": "vosk-model-ru-0.42",
+        "url": "https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip",
+        "size": "1.8 GB",
+    },
+    "lite model": {
+        "folder": "vosk-model-small-ru-0.22",
+        "url": "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip",
+        "size": "45 MB",
+    },
+    "legacy base model": {
+        "folder": "vosk-model-ru-0.22",
+        "url": "https://alphacephei.com/vosk/models/vosk-model-ru-0.22.zip",
+        "size": "1.5 GB",
+    },
+    "legacy large model": {
+        "folder": "vosk-model-ru-0.10",
+        "url": "https://alphacephei.com/vosk/models/vosk-model-ru-0.10.zip",
+        "size": "2.5 GB",
+    },
+}
+VOSK_MODEL_DIR = os.path.join(os.path.dirname(__file__), "models", "vosk")
+
+WEEKLY_TOKEN_LIMIT = 1500
+WHISPER_TOKENS_PER_SECOND = {
+    "tiny": 1,
+    "base": 2,
+    "small": 3,
+    "medium": 4,
+    "turbo": 5,
+    "large": 6,
+}
+VOSK_TOKENS_PER_SECOND = {
+    "base model": 3,
+    "lite model": 1,
+    "legacy base model": 3,
+    "legacy large model": 5,
+    "(legacy) base model": 3,
+    "(legacy) large model": 5,
+    "vosk-model-ru-0.42": 3,
+    "vosk-model-small-ru-0.22": 1,
+    "vosk-model-ru-0.22": 3,
+    "vosk-model-ru-0.10": 5,
+}
+
 # --- Config ---
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 DEFAULT_CONFIG = {
@@ -381,6 +319,7 @@ DEFAULT_CONFIG = {
     "profile_pic": None,
     "server_url": "http://95.31.11.50:7788",
     "onboarded": False,
+    "whisper_segmented_output": True,
 }
 config_data = DEFAULT_CONFIG.copy()
 startup_dialog_active = False
@@ -425,6 +364,15 @@ def load_config():
     # migrate old default port to new default
     if config_data.get("server_url") == "http://95.31.11.50:8000":
         config_data["server_url"] = "http://95.31.11.50:7788"
+    legacy_model_map = {
+        "(legacy) base model": "legacy base model",
+        "(legacy) large model": "legacy large model",
+    }
+    selected_model = config_data.get("model")
+    if selected_model in legacy_model_map:
+        config_data["model"] = legacy_model_map[selected_model]
+    if "whisper_segmented_output" not in config_data:
+        config_data["whisper_segmented_output"] = True
     current_ui_language = config_data.get("ui_language", "ru")
     selected_mic_index = config_data.get("selected_mic_index")
     audio_file_path = config_data.get("last_audio_file")
@@ -455,6 +403,8 @@ def format_segment_timestamp(seconds: Any) -> Optional[str]:
 
 
 def format_whisper_result_text(result: dict[str, Any]) -> str:
+    if not config_data.get("whisper_segmented_output", True):
+        return str(result.get("text", "")).strip()
     segments = result.get("segments")
     if isinstance(segments, list):
         lines = []
@@ -560,6 +510,8 @@ def update_ui_language(lang_choice: str):
     transcribeButton.configure(text=lang_dict["transcribe"])
     settingsButton.configure(text=lang_dict["settings"])
     cpu_checkbox.configure(text=lang_dict["use_cpu"])
+    account_button.configure(text=lang_dict["account"])
+    refresh_token_estimate_label()
 
 def apply_ttk_theme(mode: str):
     try:
@@ -588,7 +540,7 @@ def change_theme(new_theme: str):
 def open_settings_window():
     settings_win = customtkinter.CTkToplevel(root)
     settings_win.title(i18n[current_ui_language]["settings_title"])
-    settings_win.geometry("350x260")
+    settings_win.geometry("350x320")
     settings_win.transient(root)
     settings_win.bind("<Escape>", lambda _e: settings_win.destroy())
 
@@ -598,6 +550,7 @@ def open_settings_window():
         settings_win.title(i18n[lang_code]["settings_title"])
         lang_label.configure(text=i18n[lang_code]["ui_language"])
         theme_label.configure(text=i18n[lang_code]["theme"])
+        whisper_output_checkbox.configure(text=i18n[lang_code]["whisper_segment_toggle"])
         mic_label.configure(text=i18n[lang_code]["mic_device"])
 
     lang_label = customtkinter.CTkLabel(settings_win, text=i18n[current_ui_language]["ui_language"])
@@ -611,6 +564,20 @@ def open_settings_window():
     theme_segmented_button = customtkinter.CTkSegmentedButton(settings_win, values=["Light", "Dark", "System"], command=change_theme)
     theme_segmented_button.set(customtkinter.get_appearance_mode())
     theme_segmented_button.pack(pady=5, padx=10, fill="x")
+
+    whisper_output_var = tkinter.BooleanVar(value=bool(config_data.get("whisper_segmented_output", True)))
+
+    def on_whisper_output_toggle():
+        config_data["whisper_segmented_output"] = bool(whisper_output_var.get())
+        save_config()
+
+    whisper_output_checkbox = customtkinter.CTkCheckBox(
+        settings_win,
+        text=i18n[current_ui_language]["whisper_segment_toggle"],
+        variable=whisper_output_var,
+        command=on_whisper_output_toggle,
+    )
+    whisper_output_checkbox.pack(pady=(10, 5), padx=10, fill="x")
 
     mic_label = customtkinter.CTkLabel(settings_win, text=i18n[current_ui_language]["mic_device"])
     mic_label.pack(pady=(10, 5), padx=10)
@@ -626,12 +593,16 @@ def open_settings_window():
     settings_win.grab_set()
 
 def select_audio_file():
-    global audio_file_path
-    audio_file_path = filedialog.askopenfilename()
-    if audio_file_path:
-        selected_file_label.configure(text=audio_file_path.split("/")[-1])
-        config_data["last_audio_file"] = audio_file_path
-        save_config()
+    global audio_file_path, selected_audio_duration_seconds
+    selected_path = filedialog.askopenfilename()
+    if not selected_path:
+        return
+    audio_file_path = selected_path
+    selected_file_label.configure(text=os.path.basename(audio_file_path))
+    config_data["last_audio_file"] = audio_file_path
+    save_config()
+    selected_audio_duration_seconds = load_audio_duration_seconds(audio_file_path)
+    refresh_token_estimate_label()
 
 def human_readable_size(num_bytes: Optional[int]) -> str:
     if num_bytes is None:
@@ -741,6 +712,84 @@ def download_and_extract_vosk(model_key: str):
         zip_ref.extractall(VOSK_MODEL_DIR)
     os.remove(zip_path)
 
+
+def get_tokens_per_second(engine_choice: str, model_choice: str) -> int:
+    engine_lower = engine_choice.strip().lower()
+    model_lower = model_choice.strip().lower()
+    if engine_lower == "whisper":
+        return int(WHISPER_TOKENS_PER_SECOND.get(model_lower, 0))
+    if engine_lower == "vosk":
+        return int(VOSK_TOKENS_PER_SECOND.get(model_lower, 0))
+    return 0
+
+
+def format_duration_for_tokens(duration_seconds: float) -> str:
+    total = max(0, int(round(duration_seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def estimate_tokens_for_duration(engine_choice: str, model_choice: str, duration_seconds: float) -> int:
+    rate = get_tokens_per_second(engine_choice, model_choice)
+    if rate <= 0:
+        return 0
+    return int(math.ceil(max(duration_seconds, 0.0) * rate))
+
+
+def load_audio_duration_seconds(path: str) -> Optional[float]:
+    try:
+        info = sf.info(path)
+        if info.samplerate and info.frames:
+            duration = info.frames / info.samplerate
+            if duration > 0:
+                return float(duration)
+    except Exception:
+        pass
+    try:
+        whisper = get_whisper()
+        audio = whisper.load_audio(path)
+        return len(audio) / whisper.audio.SAMPLE_RATE
+    except Exception as e:
+        log.error(f"Failed to estimate audio duration for {path}: {e}")
+        return None
+
+
+def format_reset_timestamp(value: Any) -> str:
+    try:
+        ts = int(value)
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return i18n[current_ui_language]["token_reset_unknown"]
+
+
+def refresh_token_estimate_label():
+    global selected_audio_duration_seconds
+    if "token_estimate_label" not in globals() or token_estimate_label is None:
+        return
+    if selected_audio_duration_seconds is None and audio_file_path and os.path.exists(audio_file_path):
+        selected_audio_duration_seconds = load_audio_duration_seconds(audio_file_path)
+
+    lang_dict = i18n[current_ui_language]
+    if selected_audio_duration_seconds is None:
+        token_estimate_label.configure(text=lang_dict["token_estimate_placeholder"])
+        return
+
+    engine_choice = engineOptionMenu.get() if "engineOptionMenu" in globals() else str(config_data.get("engine", "Whisper"))
+    model_choice = modelOptionMenu.get() if "modelOptionMenu" in globals() else str(config_data.get("model", "base"))
+    rate = get_tokens_per_second(engine_choice, model_choice)
+    if rate <= 0:
+        token_estimate_label.configure(text=lang_dict["token_estimate_placeholder"])
+        return
+
+    required_tokens = estimate_tokens_for_duration(engine_choice, model_choice, selected_audio_duration_seconds)
+    duration_text = format_duration_for_tokens(selected_audio_duration_seconds)
+    token_estimate_label.configure(
+        text=lang_dict["token_estimate_value"].format(tokens=required_tokens, rate=rate, duration=duration_text)
+    )
+
 def update_model_label():
     engine = engineOptionMenu.get()
     if engine == "Vosk":
@@ -761,11 +810,13 @@ def update_model_options(engine_choice: str):
         cpu_checkbox.configure(state="normal")
         config_data["model"] = "base"
     update_model_label()
+    refresh_token_estimate_label()
     save_config()
 
 
 def on_model_selected(choice: str):
     config_data["model"] = choice
+    refresh_token_estimate_label()
     save_config()
 
 
@@ -782,12 +833,162 @@ def build_server_url(path: str) -> str:
     return f"{base}{path}"
 
 
+def is_trial_expired_payload(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("trial_expired") or payload.get("reason") == "trial_expired")
+
+
+def _clear_remote_auth_state():
+    global trial_expired_dialog
+    config_data.update({
+        "auth_token": None,
+        "username": None,
+        "use_external_server": None,
+        "onboarded": False,
+        "profile_pic": None,
+    })
+    remote_status_cache.clear()
+    if trial_expired_dialog is not None:
+        try:
+            trial_expired_dialog.destroy()
+        except Exception:
+            pass
+        trial_expired_dialog = None
+    save_config()
+
+
+def _prompt_delete_expired_account():
+    password = simpledialog.askstring(
+        i18n[current_ui_language]["delete_account"],
+        i18n[current_ui_language]["current_password"],
+        show="*",
+        parent=root,
+    )
+    if not password:
+        return
+    ok, reason = destroy_account_remote(password.strip())
+    if ok:
+        messagebox.showinfo(i18n[current_ui_language]["title"], i18n[current_ui_language]["account_deleted"])
+        _clear_remote_auth_state()
+        close_account_dialog()
+        root.after(50, show_initial_dialog)
+    else:
+        messagebox.showerror(
+            i18n[current_ui_language]["title"],
+            i18n[current_ui_language]["delete_account_failed"].format(reason=reason),
+        )
+
+
+def show_trial_expired_dialog(payload: Optional[dict[str, Any]] = None):
+    global trial_expired_dialog
+    if trial_expired_dialog is not None:
+        try:
+            trial_expired_dialog.lift()
+            trial_expired_dialog.focus_force()
+            return
+        except Exception:
+            trial_expired_dialog = None
+
+    dlg = customtkinter.CTkToplevel(root)
+    trial_expired_dialog = dlg
+    dlg.title(i18n[current_ui_language]["trial_expired_title"])
+    dlg.geometry("460x230")
+    dlg.transient(root)
+    dlg.lift()
+    dlg.update_idletasks()
+    dlg.wait_visibility()
+    dlg.grab_set()
+    dlg.focus_force()
+
+    def on_close(_e=None):
+        global trial_expired_dialog
+        try:
+            dlg.destroy()
+        finally:
+            trial_expired_dialog = None
+
+    dlg.bind("<Escape>", on_close)
+    dlg.protocol("WM_DELETE_WINDOW", on_close)
+
+    body = customtkinter.CTkFrame(dlg, fg_color="transparent")
+    body.pack(fill="both", expand=True, padx=20, pady=20)
+
+    customtkinter.CTkLabel(
+        body,
+        text=i18n[current_ui_language]["trial_expired_message"],
+        wraplength=400,
+        justify="left",
+    ).pack(anchor="w", pady=(0, 18))
+
+    button_row = customtkinter.CTkFrame(body, fg_color="transparent")
+    button_row.pack(fill="x")
+
+    def on_delete_click():
+        _prompt_delete_expired_account()
+        if not config_data.get("auth_token"):
+            on_close()
+
+    customtkinter.CTkButton(
+        button_row,
+        text=i18n[current_ui_language]["delete_account_button"],
+        command=on_delete_click,
+        fg_color="#d9534f",
+        hover_color="#c9302c",
+    ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+
+    customtkinter.CTkButton(
+        button_row,
+        text=i18n[current_ui_language]["upgrade_to_pro"],
+        command=lambda: messagebox.showinfo(
+            i18n[current_ui_language]["title"],
+            i18n[current_ui_language]["upgrade_not_implemented"],
+        ),
+    ).pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+
+def _handle_server_payload(payload: Any):
+    if not isinstance(payload, dict):
+        return
+    if payload.get("status") == "ok" and payload.get("token_balance") is not None:
+        remote_status_cache.clear()
+        remote_status_cache.update(payload)
+    if is_trial_expired_payload(payload):
+        if "root" in globals():
+            root.after(0, lambda: show_trial_expired_dialog(payload))
+
+
+def fetch_remote_status() -> Optional[dict[str, Any]]:
+    token = config_data.get("auth_token")
+    if not token:
+        return None
+    try:
+        response = _post_json("/v1/status", {"token": token})
+    except Exception as e:
+        log.error(f"Status request failed: {e}")
+        return None
+    if response.get("status") != "ok":
+        return None
+    return response
+
+
+def format_plan_text(status_payload: Optional[dict[str, Any]]) -> str:
+    if not status_payload:
+        return i18n[current_ui_language]["plan_placeholder"]
+    if is_trial_expired_payload(status_payload):
+        return i18n[current_ui_language]["trial_plan_expired"]
+    expires_at = status_payload.get("trial_expires_at")
+    if expires_at:
+        return i18n[current_ui_language]["trial_plan_active"].format(expires_at=format_reset_timestamp(expires_at))
+    return i18n[current_ui_language]["trial_plan_no_expiry"]
+
+
 def _post_json(path: str, payload: dict) -> dict:
     url = build_server_url(path)
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=10) as response:
-        return json.load(response)
+        parsed = json.load(response)
+    _handle_server_payload(parsed)
+    return parsed
 
 
 def _post_form(path: str, fields: dict[str, str], files: dict[str, tuple[str, bytes, str]] | None = None) -> dict:
@@ -815,7 +1016,9 @@ def _post_form(path: str, fields: dict[str, str], files: dict[str, tuple[str, by
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=15) as response:
-        return json.load(response)
+        parsed = json.load(response)
+    _handle_server_payload(parsed)
+    return parsed
 
 
 def validate_token(token: str) -> bool:
@@ -1020,7 +1223,7 @@ def show_account_dialog():
         avatar_img = fetch_remote_avatar(profile_filename, size=(70, 70))
         if avatar_img:
             avatar_label.configure(image=avatar_img)
-            avatar_label.image = avatar_img
+            setattr(avatar_label, "image", avatar_img)
 
     user_box = customtkinter.CTkFrame(header, fg_color="transparent")
     user_box.pack(side="left", fill="x", expand=True)
@@ -1030,35 +1233,39 @@ def show_account_dialog():
 
     info_frame = customtkinter.CTkFrame(wrapper, fg_color="transparent")
     info_frame.pack(fill="x", pady=(0, 20))
-    customtkinter.CTkLabel(info_frame, text=i18n[current_ui_language]["plan_placeholder"], font=("Arial", 18)).pack(anchor="w", pady=(0, 4))
-    limit_label = customtkinter.CTkLabel(info_frame, text=i18n[current_ui_language]["limit_placeholder"].format(used=0, limit=5), font=("Arial", 18))
+    plan_label = customtkinter.CTkLabel(info_frame, text=i18n[current_ui_language]["plan_placeholder"], font=("Arial", 18))
+    plan_label.pack(anchor="w", pady=(0, 4))
+    limit_label = customtkinter.CTkLabel(
+        info_frame,
+        text=i18n[current_ui_language]["limit_placeholder"].format(
+            balance=0,
+            limit=WEEKLY_TOKEN_LIMIT,
+            reset_at=i18n[current_ui_language]["token_reset_unknown"],
+        ),
+        font=("Arial", 18),
+    )
     limit_label.pack(anchor="w")
 
     def refresh_limit_label():
-        token = config_data.get("auth_token")
-        if not token:
+        status_payload = fetch_remote_status()
+        if not status_payload:
             return
-        try:
-            resp = _post_json("/v1/status", {"token": token})
-        except Exception as e:
-            log.error(f"Status request failed: {e}")
-            return
-        if resp.get("status") != "ok":
-            return
-        used = int(resp.get("daily_used", 0) or 0)
-        limit = int(resp.get("daily_limit", 5) or 5)
-        limit_label.configure(text=i18n[current_ui_language]["limit_placeholder"].format(used=used, limit=limit))
+        plan_label.configure(text=format_plan_text(status_payload))
+        balance = int(status_payload.get("token_balance", 0) or 0)
+        limit = int(status_payload.get("token_weekly_limit", WEEKLY_TOKEN_LIMIT) or WEEKLY_TOKEN_LIMIT)
+        reset_at = format_reset_timestamp(status_payload.get("token_reset_at"))
+        limit_label.configure(
+            text=i18n[current_ui_language]["limit_placeholder"].format(
+                balance=balance,
+                limit=limit,
+                reset_at=reset_at,
+            )
+        )
 
     refresh_limit_label()
 
     def do_logout():
-        config_data.update({
-            "auth_token": None,
-            "username": None,
-            "use_external_server": None,
-            "onboarded": False,
-        })
-        save_config()
+        _clear_remote_auth_state()
         dlg.destroy()
         root.after(50, show_initial_dialog)
 
@@ -1232,14 +1439,7 @@ def show_account_settings_dialog():
             ok, reason = destroy_account_remote(passwd)
             if ok:
                 messagebox.showinfo(i18n[current_ui_language]["title"], i18n[current_ui_language]["account_deleted"])
-                config_data.update({
-                    "auth_token": None,
-                    "username": None,
-                    "use_external_server": None,
-                    "onboarded": False,
-                    "profile_pic": None,
-                })
-                save_config()
+                _clear_remote_auth_state()
                 confirm.destroy()
                 dlg.destroy()
                 close_account_dialog()
@@ -1253,8 +1453,8 @@ def show_account_settings_dialog():
 
 def get_input_devices():
     devices = sd.query_devices()
-    input_devices = [d for d in devices if d.get("max_input_channels", 0) > 0]
-    display = [f"{int(d['index'])}: {d['name']}" for d in input_devices]
+    input_devices = [d for d in devices if isinstance(d, dict) and d.get("max_input_channels", 0) > 0]
+    display = [f"{int(d.get('index', 0))}: {d.get('name', 'unknown')}" for d in input_devices]
     return input_devices, display
 
 def get_mic_display_name(index: int, devices: list, display: list) -> str:
@@ -1358,7 +1558,7 @@ def toggle_pause():
         _update_recording_timer()
 
 def stop_recording(save: bool = True):
-    global recording_stream, is_recording, is_paused, audio_file_path
+    global recording_stream, is_recording, is_paused, audio_file_path, selected_audio_duration_seconds
     if not is_recording:
         return
     is_recording = False
@@ -1384,13 +1584,16 @@ def stop_recording(save: bool = True):
         filepath = os.path.join(recordings_dir, filename)
         sf.write(filepath, audio, 16000)
         audio_file_path = filepath
+        selected_audio_duration_seconds = len(audio) / 16000 if len(audio) else 0.0
         config_data["last_audio_file"] = audio_file_path
         save_config()
         selected_file_label.configure(text=filename)
         result_textbox.delete("1.0", tkinter.END)
         result_textbox.insert(tkinter.END, i18n[current_ui_language]["recording_saved"].format(name=filename))
+    refresh_token_estimate_label()
 
 def transcribe():
+    global selected_audio_duration_seconds
     if not audio_file_path:
         result_textbox.delete("1.0", tkinter.END)
         result_textbox.insert(tkinter.END, i18n[current_ui_language]["select_file_prompt"])
@@ -1398,7 +1601,34 @@ def transcribe():
     
     engine_choice = engineOptionMenu.get()
     model_choice = modelOptionMenu.get()
+
+    if selected_audio_duration_seconds is None:
+        selected_audio_duration_seconds = load_audio_duration_seconds(audio_file_path)
+        refresh_token_estimate_label()
+    required_tokens = 0
+    if selected_audio_duration_seconds is not None:
+        required_tokens = estimate_tokens_for_duration(engine_choice, model_choice, selected_audio_duration_seconds)
+
     if config_data.get("use_external_server"):
+        status = fetch_remote_status()
+        if status and is_trial_expired_payload(status):
+            show_trial_expired_dialog(status)
+            return
+
+        status_payload = status if status is not None else (dict(remote_status_cache) if remote_status_cache else None)
+        balance = int(status_payload.get("token_balance", 0) or 0) if status_payload else 0
+        if status_payload is not None and required_tokens > balance:
+            missing = max(required_tokens - balance, 0)
+            messagebox.showerror(
+                i18n[current_ui_language]["token_insufficient_title"],
+                i18n[current_ui_language]["token_insufficient_body"].format(
+                    balance=balance,
+                    required=required_tokens,
+                    missing=missing,
+                ),
+            )
+            return
+
         transcribe_thread = threading.Thread(target=_do_transcribe_external, args=(engine_choice, model_choice), daemon=True)
         transcribe_thread.start()
         return
@@ -1422,6 +1652,9 @@ def transcribe():
 
 def send_transcription_request(engine_choice: str, model_choice: str, token: str) -> str:
     global remote_transcribe_job_id
+    path = audio_file_path
+    if not path:
+        raise RuntimeError("no audio file selected")
     url = build_server_url("/v1/transcribe")
     boundary = "----voicepectaBoundary" + os.urandom(8).hex()
     body = io.BytesIO()
@@ -1444,12 +1677,12 @@ def send_transcription_request(engine_choice: str, model_choice: str, token: str
         body.write(f"--{boundary}\r\n".encode("utf-8"))
         body.write(f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8"))
 
-    with open(audio_file_path, "rb") as f:
+    with open(path, "rb") as f:
         file_content = f.read()
 
     body.write(f"--{boundary}\r\n".encode("utf-8"))
     body.write(
-        f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(audio_file_path)}"\r\n'.encode("utf-8")
+        f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(path)}"\r\n'.encode("utf-8")
     )
     body.write(b"Content-Type: application/octet-stream\r\n\r\n")
     body.write(file_content)
@@ -1518,16 +1751,26 @@ def _do_transcribe_external(engine_choice: str, model_choice: str):
         result_textbox.insert(tkinter.END, result_text)
     except Exception as e:
         log.error(f"External transcription failed: {e}")
+        message = str(e).lower()
+        if "trial expired" in message or "trial_expired" in message:
+            root.after(0, show_trial_expired_dialog)
         result_textbox.insert(tkinter.END, lang_dict["error_transcription"].format(e=e))
     finally:
         remote_transcribe_active = False
         remote_transcribe_job_id = None
+        if config_data.get("auth_token"):
+            fetch_remote_status()
         transcribeButton.configure(text=lang_dict["transcribe"], state="normal")
         progress_bar.pack_forget()
         progress_label.pack_forget()
 
 def _do_transcribe(engine_choice: str, model_choice: str):
     lang_dict = i18n[current_ui_language]
+    path = audio_file_path
+    if not path:
+        result_textbox.delete("1.0", tkinter.END)
+        result_textbox.insert(tkinter.END, lang_dict["select_file_prompt"])
+        return
     transcribeButton.configure(text=lang_dict["transcribing"], state="disabled")
     result_textbox.delete("1.0", tkinter.END)
     
@@ -1556,7 +1799,7 @@ def _do_transcribe(engine_choice: str, model_choice: str):
                 progress_bar.set(0)
                 root.update_idletasks()
                 
-                audio = whisper.load_audio(audio_file_path)
+                audio = whisper.load_audio(path)
                 duration = len(audio) / whisper.audio.SAMPLE_RATE
                 
                 sys.stdout = ProgressIOWrapper(original_stdout, progress_bar, progress_label, mode="transcribe", total_duration=duration)
@@ -1574,7 +1817,7 @@ def _do_transcribe(engine_choice: str, model_choice: str):
             progress_label.configure(text=lang_dict["loading_audio"])
             progress_bar.set(0)
             root.update_idletasks()
-            audio = whisper.load_audio(audio_file_path)
+            audio = whisper.load_audio(path)
             audio_int16 = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
             total_samples = len(audio_int16)
             model_info = get_vosk_model_info(model_choice)
@@ -1725,6 +1968,14 @@ if initial_engine == "Vosk":
 transcribeButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["transcribe"], command=transcribe, height=48)
 transcribeButton.pack(side="bottom", pady=10, padx=10, fill="x")
 
+token_estimate_label = customtkinter.CTkLabel(
+    left_frame,
+    text=i18n[current_ui_language]["token_estimate_placeholder"],
+    wraplength=220,
+    justify="center",
+)
+token_estimate_label.pack(side="bottom", pady=(0, 8), padx=10, fill="x")
+
 pauseButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["pause_recording"], command=toggle_pause, state="disabled")
 pauseButton.pack(side="bottom", pady=(0, 10), padx=10, fill="x")
 
@@ -1751,6 +2002,7 @@ result_textbox.pack(fill="both", expand=True, padx=5, pady=5)
 
 progress_bar = customtkinter.CTkProgressBar(right_frame, mode="determinate")
 progress_label = customtkinter.CTkLabel(right_frame, text="")
+refresh_token_estimate_label()
 
 
 def show_initial_dialog():
@@ -1839,8 +2091,10 @@ def show_initial_dialog():
             config_data.update({
                 "use_external_server": False,
                 "auth_token": None,
+                "profile_pic": None,
                 "onboarded": True,
             })
+            remote_status_cache.clear()
             save_config()
             dialog.destroy()
             startup_dialog_active = False
@@ -1927,8 +2181,10 @@ def show_register_dialog():
             config_data.update({
                 "use_external_server": False,
                 "auth_token": None,
+                "profile_pic": None,
                 "onboarded": True,
             })
+            remote_status_cache.clear()
             save_config()
             reg.destroy()
             startup_dialog_active = False
