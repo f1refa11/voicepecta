@@ -1,6 +1,6 @@
 import os
 import threading
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -12,6 +12,40 @@ from server.config import VOSK_MODEL_DIR
 
 _whisper_cache: Dict[str, object] = {}
 _vosk_cache: Dict[str, VoskModel] = {}
+
+
+def _format_segment_timestamp(seconds: Any) -> str | None:
+    try:
+        total_ms = max(0, int(round(float(seconds) * 1000)))
+    except (TypeError, ValueError):
+        return None
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1_000)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+    return f"{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def _format_whisper_result(result: dict[str, Any]) -> str:
+    segments = result.get("segments")
+    if isinstance(segments, list):
+        lines: list[str] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            text = str(segment.get("text", "")).strip()
+            if not text:
+                continue
+            start = _format_segment_timestamp(segment.get("start"))
+            end = _format_segment_timestamp(segment.get("end"))
+            if start and end:
+                lines.append(f"[{start} --> {end}] {text}")
+            else:
+                lines.append(text)
+        if lines:
+            return "\n".join(lines)
+    return str(result.get("text", "")).strip()
 
 
 def _get_whisper_model(model_name: str):
@@ -41,7 +75,7 @@ def transcribe_audio(engine: str, model: str, audio_path: str, language: str | N
         if language:
             kwargs["language"] = language
         result = model_obj.transcribe(audio_path, **kwargs)
-        return result.get("text", "").strip()
+        return _format_whisper_result(result)
     if engine_lower == "vosk":
         model_obj = _get_vosk_model(model)
         audio = whisper.load_audio(audio_path)

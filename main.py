@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import zipfile
 import numpy as np
-from typing import Optional
+from typing import Any, Optional
 import sounddevice as sd
 import soundfile as sf
 from datetime import datetime
@@ -439,6 +439,40 @@ def get_language_code() -> Optional[str]:
     if lang == "English":
         return "en"
     return "ru"
+
+
+def format_segment_timestamp(seconds: Any) -> Optional[str]:
+    try:
+        total_ms = max(0, int(round(float(seconds) * 1000)))
+    except (TypeError, ValueError):
+        return None
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1_000)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+    return f"{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def format_whisper_result_text(result: dict[str, Any]) -> str:
+    segments = result.get("segments")
+    if isinstance(segments, list):
+        lines = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            text = str(segment.get("text", "")).strip()
+            if not text:
+                continue
+            start = format_segment_timestamp(segment.get("start"))
+            end = format_segment_timestamp(segment.get("end"))
+            if start and end:
+                lines.append(f"[{start} --> {end}] {text}")
+            else:
+                lines.append(text)
+        if lines:
+            return "\n".join(lines)
+    return str(result.get("text", "")).strip()
 
 
 def save_config():
@@ -1365,7 +1399,7 @@ def transcribe():
     engine_choice = engineOptionMenu.get()
     model_choice = modelOptionMenu.get()
     if config_data.get("use_external_server"):
-        transcribe_thread = threading.Thread(target=_do_transcribe_external, args=(engine_choice, model_choice))
+        transcribe_thread = threading.Thread(target=_do_transcribe_external, args=(engine_choice, model_choice), daemon=True)
         transcribe_thread.start()
         return
     if engine_choice == "Whisper":
@@ -1431,7 +1465,7 @@ def send_transcription_request(engine_choice: str, model_choice: str, token: str
     current_event = None
     data_lines = []
 
-    with urllib.request.urlopen(req, timeout=120) as response:
+    with urllib.request.urlopen(req) as response:
         for raw_line in response:
             line = raw_line.decode("utf-8").strip()
             if not line:
@@ -1529,7 +1563,7 @@ def _do_transcribe(engine_choice: str, model_choice: str):
                 
                 language_code = get_language_code()
                 result = model.transcribe(audio, language=language_code, verbose=True)
-                result_textbox.insert(tkinter.END, result["text"])
+                result_textbox.insert(tkinter.END, format_whisper_result_text(result))
             finally:
                 sys.stdout = original_stdout
         else:
