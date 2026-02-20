@@ -10,20 +10,20 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from PIL import Image, ImageOps
 
 from server.auth import create_token, decode_token, hash_password, verify_password
-from server.config import AVATAR_DIR, TEMP_DIR
+from server.config import AVATAR_DIR, TEMP_DIR, TRIAL_DURATION_HOURS, WEEKLY_TOKEN_LIMIT
 from server.db import (
     create_user,
+    consume_tokens,
     delete_user,
     get_user,
     get_user_by_email,
+    get_user_limits,
     init_db,
     update_password,
     update_profile_pic,
-    consume_daily_quota,
-    get_daily_usage,
 )
 from server.jobs import Job, JobStore
-from server.transcribe import transcribe_audio
+from server.transcribe import estimate_tokens_for_audio, transcribe_audio
 
 
 try:
@@ -34,7 +34,6 @@ except AttributeError:  # Pillow<9 fallback
 
 app = FastAPI()
 jobs = JobStore()
-DAILY_LIMIT = 5
 
 
 def _json_status(status: str, **extra) -> JSONResponse:
@@ -71,6 +70,39 @@ def _get_username_from_token(token: Optional[str], authorization: Optional[str])
     if not token_value:
         return None
     return decode_token(token_value)
+
+
+def _build_account_payload(username: str, row: dict, limits: Optional[dict] = None) -> dict:
+    state = limits or get_user_limits(username) or {}
+    return {
+        "user": username,
+        "profile_pic": row.get("profile_pic"),
+        "plan": "trial",
+        "trial_duration_hours": TRIAL_DURATION_HOURS,
+        "trial_started_at": state.get("trial_started_at"),
+        "trial_expires_at": state.get("trial_expires_at"),
+        "trial_expired": bool(state.get("trial_expired", False)),
+        "token_balance": int(state.get("token_balance", WEEKLY_TOKEN_LIMIT) or 0),
+        "token_weekly_limit": WEEKLY_TOKEN_LIMIT,
+        "token_reset_at": state.get("token_next_reset_at"),
+        "token_next_reset_at": state.get("token_next_reset_at"),
+    }
+
+
+def _trial_expired_response(username: str, row: dict, limits: Optional[dict] = None) -> Optional[JSONResponse]:
+    state = limits or get_user_limits(username)
+    if not state or not state.get("trial_expired"):
+        return None
+    payload = _build_account_payload(username, row, state)
+    payload["reason"] = "trial_expired"
+    return _json_status("fail", **payload)
+
+
+def _sse_error_response(message: str) -> StreamingResponse:
+    return StreamingResponse(
+        iter([_sse_event("error", message)]),
+        media_type="text/event-stream",
+    )
 
 
 def _start_transcription_job(job: Job) -> None:
@@ -135,19 +167,17 @@ async def login(request: Request) -> JSONResponse:
     row = get_user(username)
     if not row:
         return _json_status("fail")
-    if not verify_password(password, row["passwd"]):
+    if not verify_password(password, str(row.get("passwd", ""))):
+        return _json_status("fail")
+    limits = get_user_limits(username)
+    if not limits:
         return _json_status("fail")
     token = create_token(username)
-    profile = row["profile_pic"] if "profile_pic" in row.keys() else None
-    used, remaining, reset_at = get_daily_usage(username, DAILY_LIMIT)
+    account_payload = _build_account_payload(username, row, limits)
     return _json_status(
         "ok",
         token=token,
-        profile_pic=profile,
-        daily_used=used,
-        daily_limit=DAILY_LIMIT,
-        daily_remaining=remaining,
-        daily_reset_at=reset_at,
+        **account_payload,
     )
 
 
@@ -162,8 +192,11 @@ async def change_password(
     if not username or not old_pass or not new_pass:
         return _json_status("fail")
     row = get_user(username)
-    if not row or not verify_password(old_pass, row["passwd"]):
+    if not row or not verify_password(old_pass, str(row.get("passwd", ""))):
         return _json_status("fail")
+    trial_block = _trial_expired_response(username, row)
+    if trial_block is not None:
+        return trial_block
     new_hash = hash_password(new_pass)
     if not update_password(username, new_hash):
         return _json_status("fail")
@@ -181,7 +214,7 @@ async def destroy_account(
     if not username or not passwd:
         return _json_status("fail")
     row = get_user(username)
-    if not row or not verify_password(passwd, row["passwd"]):
+    if not row or not verify_password(passwd, str(row.get("passwd", ""))):
         return _json_status("fail")
     old_avatar = delete_user(username)
     if old_avatar:
@@ -205,6 +238,9 @@ async def upload_profile_picture(
     user = get_user(username)
     if not user:
         return _json_status("fail")
+    trial_block = _trial_expired_response(username, user)
+    if trial_block is not None:
+        return trial_block
     try:
         content = await profile_pic.read()
         image = Image.open(io.BytesIO(content)).convert("RGBA")
@@ -218,7 +254,7 @@ async def upload_profile_picture(
         image.save(out_path, format="PNG")
     except Exception:
         return _json_status("fail")
-    old_avatar = user.get("profile_pic") if isinstance(user, dict) else user["profile_pic"]
+    old_avatar = user.get("profile_pic")
     if not update_profile_pic(username, filename):
         out_path.unlink(missing_ok=True)
         return _json_status("fail")
@@ -270,17 +306,10 @@ async def status(request: Request, authorization: Optional[str] = Header(default
     row = get_user(username)
     if not row:
         return _json_status("fail")
-    profile = row["profile_pic"] if "profile_pic" in row.keys() else None
-    used, remaining, reset_at = get_daily_usage(username, DAILY_LIMIT)
-    return _json_status(
-        "ok",
-        user=username,
-        profile_pic=profile,
-        daily_used=used,
-        daily_limit=DAILY_LIMIT,
-        daily_remaining=remaining,
-        daily_reset_at=reset_at,
-    )
+    limits = get_user_limits(username)
+    if not limits:
+        return _json_status("fail")
+    return _json_status("ok", **_build_account_payload(username, row, limits))
 
 
 @app.post("/v1/transcribe")
@@ -294,24 +323,41 @@ async def transcribe(
     authorization: Optional[str] = Header(default=None),
 ) -> StreamingResponse:
     username = _get_username_from_token(token, authorization)
-    if not username or not get_user(username):
-        return StreamingResponse(
-            iter([_sse_event("error", "auth failed")]),
-            media_type="text/event-stream",
-        )
+    row = get_user(username) if username else None
+    if not username or not row:
+        return _sse_error_response("auth failed")
 
-    ok, remaining = consume_daily_quota(username, daily_limit=DAILY_LIMIT)
-    if not ok:
-        return StreamingResponse(
-            iter([_sse_event("error", "daily limit exceeded")]),
-            media_type="text/event-stream",
-        )
+    limits = get_user_limits(username)
+    if not limits:
+        return _sse_error_response("auth failed")
+    if limits.get("trial_expired"):
+        return _sse_error_response("trial expired")
 
     suffix = Path(file.filename or "").suffix
     temp_name = f"{os.urandom(8).hex()}{suffix}"
     temp_path = TEMP_DIR / temp_name
     content = await file.read()
     temp_path.write_bytes(content)
+
+    try:
+        required_tokens = estimate_tokens_for_audio(engine, model, str(temp_path))
+    except Exception as exc:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        return _sse_error_response(f"token estimate failed: {exc}")
+
+    ok, balance, _reset_at = consume_tokens(username, required_tokens)
+    if not ok:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        missing = max(required_tokens - balance, 0)
+        return _sse_error_response(
+            f"insufficient tokens: balance={balance}, required={required_tokens}, missing={missing}"
+        )
 
     job = Job(str(temp_path), engine, model, username, language)
     jobs.add(job)
