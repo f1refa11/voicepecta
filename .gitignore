@@ -212,3 +212,6 @@ server/voicepecta.db
 
 recordings/
 config.json
+
+/uv.lock
+/models
