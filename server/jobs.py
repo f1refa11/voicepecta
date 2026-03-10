@@ -1,18 +1,26 @@
 import threading
-import threading
 import uuid
 from queue import Queue
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 
 class Job:
-    def __init__(self, audio_path: str, engine: str, model: str, username: str, language: str | None = None) -> None:
+    def __init__(
+        self,
+        audio_path: str,
+        engine: str,
+        model: str,
+        username: str,
+        language: str | None = None,
+        preprocessing: Optional[dict[str, Any]] = None,
+    ) -> None:
         self.id = str(uuid.uuid4())
         self.audio_path = audio_path
         self.engine = engine
         self.model = model
         self.username = username
         self.language = language
+        self.preprocessing = preprocessing or {}
         self.result: Optional[str] = None
         self.error: Optional[str] = None
         self._subscribers: list[Queue] = []

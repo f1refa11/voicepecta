@@ -41,6 +41,7 @@ remote_transcribe_job_id: Optional[str] = None
 remote_transcribe_active = False
 account_dialog: Optional[customtkinter.CTkToplevel] = None
 token_estimate_label: Optional[customtkinter.CTkLabel] = None
+preprocessingButton: Optional[customtkinter.CTkButton] = None
 selected_mic_index = None
 selected_audio_duration_seconds: Optional[float] = None
 trial_expired_dialog: Optional[customtkinter.CTkToplevel] = None
@@ -94,12 +95,19 @@ i18n = {
         "limit_placeholder": "tokens: {balance} / {limit} (resets: {reset_at})",
         "whisper_segment_toggle": "Whisper timestamps/new lines",
         "token_estimate_placeholder": "Estimated cost: select a file",
-        "token_estimate_value": "Estimated cost: {tokens} tokens ({rate}/sec, {duration})",
+        "token_estimate_value": "Estimated cost: {total} tokens ({transcription} transcription + {preprocessing} pre-processing, {duration})",
         "token_insufficient_title": "Not enough tokens",
         "token_insufficient_body": "You do not have enough tokens for this transcription.\nBalance: {balance}\nRequired: {required}\nNeed more: {missing}",
         "token_balance_label": "Token balance: {balance} / {limit}",
         "token_reset_label": "Resets at: {reset_at}",
         "token_reset_unknown": "unknown",
+        "preprocessing": "Pre-processing",
+        "preprocessing_title": "Pre-processing",
+        "deep_noise_remover": "Deep Noise Remover",
+        "noise_remover": "Noise Remover",
+        "attenuation_limit_db": "Attenuation limit (dB)",
+        "post_filter": "Post-filter",
+        "post_filter_beta": "Post-filter beta",
         "trial_plan_active": "Plan: Trial (expires {expires_at})",
         "trial_plan_expired": "Plan: Trial (expired)",
         "trial_plan_no_expiry": "Plan: Trial (no expiry)",
@@ -195,12 +203,19 @@ i18n = {
         "limit_placeholder": "Токены: {balance} / {limit} (сброс: {reset_at})",
         "whisper_segment_toggle": "Whisper: таймкоды/переносы",
         "token_estimate_placeholder": "Оценка стоимости: выберите файл",
-        "token_estimate_value": "Оценка стоимости: {tokens} токенов ({rate}/сек, {duration})",
+        "token_estimate_value": "Оценка стоимости: {total} токенов ({transcription} транскрибация + {preprocessing} пре-обработка, {duration})",
         "token_insufficient_title": "Недостаточно токенов",
         "token_insufficient_body": "Недостаточно токенов для этой транскрибации.\nБаланс: {balance}\nТребуется: {required}\nНужно добавить: {missing}",
         "token_balance_label": "Баланс токенов: {balance} / {limit}",
         "token_reset_label": "Сброс: {reset_at}",
         "token_reset_unknown": "неизвестно",
+        "preprocessing": "Пре-обработка",
+        "preprocessing_title": "Пре-обработка",
+        "deep_noise_remover": "Глубокое шумоподавление",
+        "noise_remover": "Шумоподавление",
+        "attenuation_limit_db": "Предел ослабления (дБ)",
+        "post_filter": "Пост-фильтр",
+        "post_filter_beta": "Бета пост-фильтра",
         "trial_plan_active": "Тариф: пробный (до {expires_at})",
         "trial_plan_expired": "Тариф: пробный (истек)",
         "trial_plan_no_expiry": "Тариф: пробный (без срока)",
@@ -302,6 +317,20 @@ VOSK_TOKENS_PER_SECOND = {
     "vosk-model-ru-0.10": 5,
 }
 
+DEEP_NOISE_REMOVER_TOKENS_PER_MINUTE = 3
+NOISE_REMOVER_TOKENS_PER_MINUTE = 2
+DEFAULT_PREPROCESSING_CONFIG = {
+    "deep_noise_remover": {
+        "enabled": False,
+        "attenuation_limit_db": 12,
+        "post_filter": False,
+        "post_filter_beta": 0.02,
+    },
+    "noise_remover": {
+        "enabled": False,
+    },
+}
+
 # --- Config ---
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 DEFAULT_CONFIG = {
@@ -317,9 +346,10 @@ DEFAULT_CONFIG = {
     "auth_token": None,
     "username": None,
     "profile_pic": None,
-    "server_url": "http://95.31.11.50:7788",
+    "server_url": "http://127.0.0.1:7788",
     "onboarded": False,
     "whisper_segmented_output": True,
+    "preprocessing": DEFAULT_PREPROCESSING_CONFIG,
 }
 config_data = DEFAULT_CONFIG.copy()
 startup_dialog_active = False
@@ -352,6 +382,67 @@ def get_vosk():
     return _vosk_module
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def _as_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _as_beta(value: Any, default: float = 0.02) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    parsed = max(0.0, min(0.05, parsed))
+    return round(round(parsed / 0.01) * 0.01, 2)
+
+
+def normalize_preprocessing_config(raw: Any) -> dict[str, Any]:
+    deep_default = DEFAULT_PREPROCESSING_CONFIG["deep_noise_remover"]
+    noise_default = DEFAULT_PREPROCESSING_CONFIG["noise_remover"]
+    deep_raw: Any = {}
+    noise_raw: Any = {}
+    if isinstance(raw, dict):
+        deep_raw = raw.get("deep_noise_remover")
+        noise_raw = raw.get("noise_remover")
+    if not isinstance(deep_raw, dict):
+        deep_raw = {}
+    if not isinstance(noise_raw, dict):
+        noise_raw = {}
+    return {
+        "deep_noise_remover": {
+            "enabled": _as_bool(deep_raw.get("enabled"), bool(deep_default["enabled"])),
+            "attenuation_limit_db": _as_int(
+                deep_raw.get("attenuation_limit_db"),
+                int(deep_default["attenuation_limit_db"]),
+                0,
+                100,
+            ),
+            "post_filter": _as_bool(deep_raw.get("post_filter"), bool(deep_default["post_filter"])),
+            "post_filter_beta": _as_beta(deep_raw.get("post_filter_beta"), float(deep_default["post_filter_beta"])),
+        },
+        "noise_remover": {
+            "enabled": _as_bool(noise_raw.get("enabled"), bool(noise_default["enabled"])),
+        },
+    }
+
+
+def get_preprocessing_config() -> dict[str, Any]:
+    return normalize_preprocessing_config(config_data.get("preprocessing"))
+
+
 def load_config():
     global config_data, current_ui_language, selected_mic_index, audio_file_path
     try:
@@ -373,6 +464,7 @@ def load_config():
         config_data["model"] = legacy_model_map[selected_model]
     if "whisper_segmented_output" not in config_data:
         config_data["whisper_segmented_output"] = True
+    config_data["preprocessing"] = normalize_preprocessing_config(config_data.get("preprocessing"))
     current_ui_language = config_data.get("ui_language", "ru")
     selected_mic_index = config_data.get("selected_mic_index")
     audio_file_path = config_data.get("last_audio_file")
@@ -509,6 +601,8 @@ def update_ui_language(lang_choice: str):
     pauseButton.configure(text=lang_dict["pause_recording"] if not is_paused else lang_dict["resume_recording"])
     transcribeButton.configure(text=lang_dict["transcribe"])
     settingsButton.configure(text=lang_dict["settings"])
+    if preprocessingButton is not None:
+        preprocessingButton.configure(text=lang_dict["preprocessing"])
     cpu_checkbox.configure(text=lang_dict["use_cpu"])
     account_button.configure(text=lang_dict["account"])
     refresh_token_estimate_label()
@@ -591,6 +685,155 @@ def open_settings_window():
     mic_combo.pack(pady=5, padx=10, fill="x")
     
     settings_win.grab_set()
+
+
+def open_preprocessing_window():
+    pre_win = customtkinter.CTkToplevel(root)
+    pre_win.title(i18n[current_ui_language]["preprocessing_title"])
+    pre_win.geometry("420x380")
+    pre_win.transient(root)
+    pre_win.bind("<Escape>", lambda _e: pre_win.destroy())
+
+    config = get_preprocessing_config()
+    deep_cfg = config["deep_noise_remover"]
+    noise_cfg = config["noise_remover"]
+
+    deep_enabled_var = tkinter.BooleanVar(value=bool(deep_cfg["enabled"]))
+    attenuation_var = tkinter.DoubleVar(value=float(int(deep_cfg["attenuation_limit_db"])))
+    post_filter_var = tkinter.BooleanVar(value=bool(deep_cfg["post_filter"]))
+    beta_slider_var = tkinter.DoubleVar(value=float(round(float(deep_cfg["post_filter_beta"]) * 100)))
+    noise_enabled_var = tkinter.BooleanVar(value=bool(noise_cfg["enabled"]))
+
+    def save_preprocessing_config():
+        config_data["preprocessing"] = normalize_preprocessing_config(
+            {
+                "deep_noise_remover": {
+                    "enabled": bool(deep_enabled_var.get()),
+                    "attenuation_limit_db": int(round(float(attenuation_var.get()))),
+                    "post_filter": bool(post_filter_var.get()),
+                    "post_filter_beta": round(float(beta_slider_var.get()) / 100.0, 2),
+                },
+                "noise_remover": {
+                    "enabled": bool(noise_enabled_var.get()),
+                },
+            }
+        )
+        save_config()
+        refresh_token_estimate_label()
+
+    wrapper = customtkinter.CTkFrame(pre_win, fg_color="transparent")
+    wrapper.pack(fill="both", expand=True, padx=14, pady=14)
+
+    customtkinter.CTkLabel(wrapper, text=i18n[current_ui_language]["preprocessing_title"], font=("Arial", 18)).pack(anchor="w", pady=(0, 8))
+
+    deep_frame = customtkinter.CTkFrame(wrapper)
+    deep_frame.pack(fill="x", pady=(0, 10))
+
+    deep_checkbox = customtkinter.CTkCheckBox(
+        deep_frame,
+        text=i18n[current_ui_language]["deep_noise_remover"],
+        variable=deep_enabled_var,
+        command=save_preprocessing_config,
+    )
+    deep_checkbox.pack(anchor="w", padx=10, pady=(10, 6))
+
+    deep_settings = customtkinter.CTkFrame(deep_frame, fg_color="transparent")
+    deep_settings.pack(fill="x", padx=10, pady=(0, 10))
+
+    attenuation_row = customtkinter.CTkFrame(deep_settings, fg_color="transparent")
+    attenuation_row.pack(fill="x", pady=(0, 6))
+    customtkinter.CTkLabel(attenuation_row, text=i18n[current_ui_language]["attenuation_limit_db"], width=180, anchor="w").pack(side="left")
+    attenuation_value_label = customtkinter.CTkLabel(
+        attenuation_row,
+        text=f"{int(round(float(attenuation_var.get())))} dB",
+        width=70,
+        anchor="e",
+    )
+    attenuation_value_label.pack(side="right")
+    attenuation_slider = customtkinter.CTkSlider(
+        deep_settings,
+        from_=0,
+        to=100,
+        number_of_steps=100,
+        variable=attenuation_var,
+    )
+    attenuation_slider.pack(fill="x", pady=(0, 10))
+
+    post_filter_checkbox = customtkinter.CTkCheckBox(
+        deep_settings,
+        text=i18n[current_ui_language]["post_filter"],
+        variable=post_filter_var,
+        command=save_preprocessing_config,
+    )
+    post_filter_checkbox.pack(anchor="w", pady=(0, 6))
+
+    beta_row = customtkinter.CTkFrame(deep_settings, fg_color="transparent")
+    beta_row.pack(fill="x")
+    customtkinter.CTkLabel(beta_row, text=i18n[current_ui_language]["post_filter_beta"], width=180, anchor="w").pack(side="left")
+    beta_value_label = customtkinter.CTkLabel(
+        beta_row,
+        text=f"{float(beta_slider_var.get()) / 100.0:.2f}",
+        width=70,
+        anchor="e",
+    )
+    beta_value_label.pack(side="right")
+    beta_slider = customtkinter.CTkSlider(
+        deep_settings,
+        from_=0,
+        to=5,
+        number_of_steps=5,
+        variable=beta_slider_var,
+    )
+    beta_slider.pack(fill="x", pady=(6, 0))
+
+    noise_frame = customtkinter.CTkFrame(wrapper)
+    noise_frame.pack(fill="x")
+
+    noise_checkbox = customtkinter.CTkCheckBox(
+        noise_frame,
+        text=i18n[current_ui_language]["noise_remover"],
+        variable=noise_enabled_var,
+        command=save_preprocessing_config,
+    )
+    noise_checkbox.pack(anchor="w", padx=10, pady=10)
+
+    def on_attenuation_change(value: float):
+        rounded = int(round(float(value)))
+        attenuation_var.set(float(rounded))
+        attenuation_value_label.configure(text=f"{rounded} dB")
+        save_preprocessing_config()
+
+    def on_beta_change(value: float):
+        rounded = int(round(float(value)))
+        beta_slider_var.set(float(rounded))
+        beta_value_label.configure(text=f"{rounded / 100.0:.2f}")
+        save_preprocessing_config()
+
+    attenuation_slider.configure(command=on_attenuation_change)
+    beta_slider.configure(command=on_beta_change)
+
+    def update_control_states():
+        deep_state = "normal" if deep_enabled_var.get() else "disabled"
+        attenuation_slider.configure(state=deep_state)
+        post_filter_checkbox.configure(state=deep_state)
+        beta_state = "normal" if (deep_enabled_var.get() and post_filter_var.get()) else "disabled"
+        beta_slider.configure(state=beta_state)
+
+    def on_deep_toggle():
+        save_preprocessing_config()
+        update_control_states()
+
+    def on_post_filter_toggle():
+        save_preprocessing_config()
+        update_control_states()
+
+    deep_checkbox.configure(command=on_deep_toggle)
+    post_filter_checkbox.configure(command=on_post_filter_toggle)
+    on_attenuation_change(float(attenuation_var.get()))
+    on_beta_change(float(beta_slider_var.get()))
+    update_control_states()
+
+    pre_win.grab_set()
 
 def select_audio_file():
     global audio_file_path, selected_audio_duration_seconds
@@ -732,11 +975,37 @@ def format_duration_for_tokens(duration_seconds: float) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
-def estimate_tokens_for_duration(engine_choice: str, model_choice: str, duration_seconds: float) -> int:
+def estimate_transcription_tokens_for_duration(engine_choice: str, model_choice: str, duration_seconds: float) -> int:
     rate = get_tokens_per_second(engine_choice, model_choice)
     if rate <= 0:
         return 0
     return int(math.ceil(max(duration_seconds, 0.0) * rate))
+
+
+def estimate_preprocessing_tokens_for_duration(
+    duration_seconds: float,
+    preprocessing_config: Optional[dict[str, Any]] = None,
+) -> int:
+    config = normalize_preprocessing_config(preprocessing_config if preprocessing_config is not None else config_data.get("preprocessing"))
+    duration_minutes = max(duration_seconds, 0.0) / 60.0
+    tokens = 0
+    if config["deep_noise_remover"]["enabled"]:
+        tokens += int(math.ceil(duration_minutes * DEEP_NOISE_REMOVER_TOKENS_PER_MINUTE))
+    if config["noise_remover"]["enabled"]:
+        tokens += int(math.ceil(duration_minutes * NOISE_REMOVER_TOKENS_PER_MINUTE))
+    return tokens
+
+
+def estimate_total_tokens_for_duration(
+    engine_choice: str,
+    model_choice: str,
+    duration_seconds: float,
+    preprocessing_config: Optional[dict[str, Any]] = None,
+) -> tuple[int, int, int]:
+    transcription_tokens = estimate_transcription_tokens_for_duration(engine_choice, model_choice, duration_seconds)
+    preprocessing_tokens = estimate_preprocessing_tokens_for_duration(duration_seconds, preprocessing_config)
+    total_tokens = transcription_tokens + preprocessing_tokens
+    return total_tokens, transcription_tokens, preprocessing_tokens
 
 
 def load_audio_duration_seconds(path: str) -> Optional[float]:
@@ -767,6 +1036,7 @@ def format_reset_timestamp(value: Any) -> str:
 
 def refresh_token_estimate_label():
     global selected_audio_duration_seconds
+    log.info("[token] refresh estimate label")
     if "token_estimate_label" not in globals() or token_estimate_label is None:
         return
     if selected_audio_duration_seconds is None and audio_file_path and os.path.exists(audio_file_path):
@@ -779,15 +1049,23 @@ def refresh_token_estimate_label():
 
     engine_choice = engineOptionMenu.get() if "engineOptionMenu" in globals() else str(config_data.get("engine", "Whisper"))
     model_choice = modelOptionMenu.get() if "modelOptionMenu" in globals() else str(config_data.get("model", "base"))
-    rate = get_tokens_per_second(engine_choice, model_choice)
-    if rate <= 0:
+    if get_tokens_per_second(engine_choice, model_choice) <= 0:
         token_estimate_label.configure(text=lang_dict["token_estimate_placeholder"])
         return
 
-    required_tokens = estimate_tokens_for_duration(engine_choice, model_choice, selected_audio_duration_seconds)
+    total_tokens, transcription_tokens, preprocessing_tokens = estimate_total_tokens_for_duration(
+        engine_choice,
+        model_choice,
+        selected_audio_duration_seconds,
+    )
     duration_text = format_duration_for_tokens(selected_audio_duration_seconds)
     token_estimate_label.configure(
-        text=lang_dict["token_estimate_value"].format(tokens=required_tokens, rate=rate, duration=duration_text)
+        text=lang_dict["token_estimate_value"].format(
+            total=total_tokens,
+            transcription=transcription_tokens,
+            preprocessing=preprocessing_tokens,
+            duration=duration_text,
+        )
     )
 
 def update_model_label():
@@ -1594,23 +1872,35 @@ def stop_recording(save: bool = True):
 
 def transcribe():
     global selected_audio_duration_seconds
+    log.info("[transcribe] Receive function call")
+    
+    # TODO: вместо вставки текста в text area, показывать диалоговое окно
     if not audio_file_path:
+        log.debug("[transcribe] No audio file specified")
         result_textbox.delete("1.0", tkinter.END)
         result_textbox.insert(tkinter.END, i18n[current_ui_language]["select_file_prompt"])
         return
     
     engine_choice = engineOptionMenu.get()
     model_choice = modelOptionMenu.get()
+    log.info(f"[transcribe] engine: \"{engine_choice}\"; model: \"{model_choice}\"")
 
     if selected_audio_duration_seconds is None:
+        log.debug("[transcribe] no audio duration specified - refreshing token estimate")
         selected_audio_duration_seconds = load_audio_duration_seconds(audio_file_path)
         refresh_token_estimate_label()
     required_tokens = 0
     if selected_audio_duration_seconds is not None:
-        required_tokens = estimate_tokens_for_duration(engine_choice, model_choice, selected_audio_duration_seconds)
+        required_tokens, _transcription_tokens, _preprocessing_tokens = estimate_total_tokens_for_duration(
+            engine_choice,
+            model_choice,
+            selected_audio_duration_seconds,
+        )
 
     if config_data.get("use_external_server"):
+        log.info("[transcribe] using external server")
         status = fetch_remote_status()
+        log.debug("[transcribe] fetched status")
         if status and is_trial_expired_payload(status):
             show_trial_expired_dialog(status)
             return
@@ -1631,6 +1921,7 @@ def transcribe():
 
         transcribe_thread = threading.Thread(target=_do_transcribe_external, args=(engine_choice, model_choice), daemon=True)
         transcribe_thread.start()
+        log.info("[transcribe] external transcribe request thread started")
         return
     if engine_choice == "Whisper":
         if not is_whisper_model_downloaded(model_choice):
@@ -1652,6 +1943,7 @@ def transcribe():
 
 def send_transcription_request(engine_choice: str, model_choice: str, token: str) -> str:
     global remote_transcribe_job_id
+    log.info("[send_transcription_request] receive call")
     path = audio_file_path
     if not path:
         raise RuntimeError("no audio file selected")
@@ -1668,6 +1960,7 @@ def send_transcription_request(engine_choice: str, model_choice: str, token: str
         "engine": engine_choice,
         "model": model_to_send,
         "token": token,
+        "preprocessing": json.dumps(get_preprocessing_config()),
     }
     language_code = get_language_code()
     if language_code:
@@ -1727,6 +2020,8 @@ def send_transcription_request(engine_choice: str, model_choice: str, token: str
 
 def _do_transcribe_external(engine_choice: str, model_choice: str):
     global remote_transcribe_job_id, remote_transcribe_active
+    log.debug("[transcribe] external function call received")
+    
     lang_dict = i18n[current_ui_language]
     transcribeButton.configure(text=lang_dict["transcribing"], state="disabled")
     result_textbox.delete("1.0", tkinter.END)
@@ -1747,6 +2042,7 @@ def _do_transcribe_external(engine_choice: str, model_choice: str):
     remote_transcribe_active = True
     remote_transcribe_job_id = None
     try:
+        log.debug("[transcribe] send transcription request")
         result_text = send_transcription_request(engine_choice, model_choice, token)
         result_textbox.insert(tkinter.END, result_text)
     except Exception as e:
@@ -1981,6 +2277,16 @@ pauseButton.pack(side="bottom", pady=(0, 10), padx=10, fill="x")
 
 recordButton = customtkinter.CTkButton(left_frame, text=i18n[current_ui_language]["record"], command=toggle_recording)
 recordButton.pack(side="bottom", pady=(0, 10), padx=10, fill="x")
+
+preprocessingButton = customtkinter.CTkButton(
+    left_frame,
+    text=i18n[current_ui_language]["preprocessing"],
+    command=open_preprocessing_window,
+    fg_color="transparent",
+    border_width=2,
+    text_color=("black", "white"),
+)
+preprocessingButton.pack(side="bottom", pady=(0,10), padx=10, fill="x")
 
 settingsButton = customtkinter.CTkButton(
     left_frame,

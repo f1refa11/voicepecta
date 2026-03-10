@@ -1,9 +1,11 @@
 import io
+import json
+import logging
 import os
 import threading
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, File, Form, Header, Request, UploadFile, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -23,7 +25,13 @@ from server.db import (
     update_profile_pic,
 )
 from server.jobs import Job, JobStore
-from server.transcribe import estimate_tokens_for_audio, transcribe_audio
+from server.preprocess import (
+    estimate_preprocessing_tokens,
+    is_preprocessing_enabled,
+    normalize_preprocessing_config,
+    preprocess_audio,
+)
+from server.transcribe import get_audio_duration_seconds, estimate_tokens_for_duration, transcribe_audio
 
 
 try:
@@ -34,6 +42,7 @@ except AttributeError:  # Pillow<9 fallback
 
 app = FastAPI()
 jobs = JobStore()
+logger = logging.getLogger(__name__)
 
 
 def _json_status(status: str, **extra) -> JSONResponse:
@@ -105,30 +114,82 @@ def _sse_error_response(message: str) -> StreamingResponse:
     )
 
 
+def _parse_preprocessing_payload(raw_payload: Optional[str]) -> dict[str, Any]:
+    if not raw_payload:
+        return normalize_preprocessing_config({})
+    try:
+        decoded = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid preprocessing payload") from exc
+    return normalize_preprocessing_config(decoded)
+
+
 def _start_transcription_job(job: Job) -> None:
     def _run() -> None:
+        generated_paths: list[str] = []
+        audio_path_for_transcription = job.audio_path
         try:
+            logger.info(
+                "Starting transcription job id=%s user=%s engine=%s model=%s",
+                job.id,
+                job.username,
+                job.engine,
+                job.model,
+            )
             if job.cancel_event.is_set():
                 raise RuntimeError("cancelled")
             job.emit("status", "loading model")
+
+            if is_preprocessing_enabled(job.preprocessing):
+                if job.cancel_event.is_set():
+                    raise RuntimeError("cancelled")
+                job.emit("status", "pre-processing")
+                audio_path_for_transcription, generated_paths = preprocess_audio(
+                    job.audio_path,
+                    job.preprocessing,
+                    cancel_event=job.cancel_event,
+                )
+
             if job.cancel_event.is_set():
                 raise RuntimeError("cancelled")
             job.emit("status", "transcribing")
-            job.result = transcribe_audio(job.engine, job.model, job.audio_path, job.language, job.cancel_event)
+            job.result = transcribe_audio(
+                job.engine,
+                job.model,
+                audio_path_for_transcription,
+                job.language,
+                job.cancel_event,
+                status_callback=lambda message: job.emit("status", message),
+            )
             if job.cancel_event.is_set():
                 raise RuntimeError("cancelled")
             job.emit("result", job.result)
             job.emit("status", "done")
+            logger.info("Completed transcription job id=%s", job.id)
         except Exception as exc:
             job.error = str(exc)
+            logger.exception(
+                "Transcription job failed id=%s user=%s engine=%s model=%s",
+                job.id,
+                job.username,
+                job.engine,
+                job.model,
+            )
             job.emit("error", job.error)
         finally:
             job.close()
             jobs.remove(job.id)
-            try:
-                os.remove(job.audio_path)
-            except OSError:
-                pass
+
+            paths_to_cleanup = [job.audio_path, *generated_paths]
+            seen: set[str] = set()
+            for path in paths_to_cleanup:
+                if not path or path in seen:
+                    continue
+                seen.add(path)
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
@@ -319,6 +380,7 @@ async def transcribe(
     engine: str = Form(...),
     model: str = Form(...),
     language: str | None = Form(default=None),
+    preprocessing: str | None = Form(default=None),
     token: Optional[str] = Form(default=None),
     authorization: Optional[str] = Header(default=None),
 ) -> StreamingResponse:
@@ -340,7 +402,18 @@ async def transcribe(
     temp_path.write_bytes(content)
 
     try:
-        required_tokens = estimate_tokens_for_audio(engine, model, str(temp_path))
+        preprocessing_config = _parse_preprocessing_payload(preprocessing)
+    except ValueError as exc:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        return _sse_error_response(str(exc))
+
+    try:
+        duration_seconds = get_audio_duration_seconds(str(temp_path))
+        required_tokens = estimate_tokens_for_duration(engine, model, duration_seconds)
+        required_tokens += estimate_preprocessing_tokens(duration_seconds, preprocessing_config)
     except Exception as exc:
         try:
             os.remove(temp_path)
@@ -359,7 +432,14 @@ async def transcribe(
             f"insufficient tokens: balance={balance}, required={required_tokens}, missing={missing}"
         )
 
-    job = Job(str(temp_path), engine, model, username, language)
+    job = Job(
+        str(temp_path),
+        engine,
+        model,
+        username,
+        language,
+        preprocessing=preprocessing_config,
+    )
     jobs.add(job)
     _start_transcription_job(job)
 
